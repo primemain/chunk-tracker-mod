@@ -243,11 +243,11 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.2'
+          gradle-version: '9.2.1'
 
       - name: Make the Gradle wrapper
         run: |
-          gradle wrapper --gradle-version 9.2
+          gradle wrapper --gradle-version 9.2.1
           chmod +x gradlew
 
       - name: Build the mod
