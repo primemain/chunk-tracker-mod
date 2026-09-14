@@ -26,15 +26,13 @@ jobs:
           cat > settings.gradle << 'EOF'
           pluginManagement {
               repositories {
-                  maven { url = "https://maven.fabricmc.net/" }
+                  maven { url = uri("https://maven.fabricmc.net/") }
                   mavenCentral()
                   gradlePluginPortal()
               }
           }
           EOF
 
-          # Everything now targets 1.21.11, matching the modpack.
-          # fabric_version is the exact build the pack already loads.
           cat > gradle.properties << 'EOF'
           org.gradle.jvmargs=-Xmx2G
           minecraft_version=1.21.11
@@ -87,8 +85,6 @@ jobs:
           }
           EOF
 
-          # Pinned to 1.21.11 now that the mod is actually compiled against it.
-          # The wildcard is gone on purpose: it hid a real incompatibility.
           cat > src/main/resources/fabric.mod.json << 'EOF'
           {
             "schemaVersion": 1,
@@ -164,10 +160,6 @@ jobs:
 
               @Override
               public void onInitializeClient() {
-                  // CHANGED FOR 1.21.11: the last argument used to be a plain
-                  // String category. Since 1.21.9 it is a KeyBinding.Category
-                  // object. Using the built-in MISC category avoids needing to
-                  // register a custom one.
                   markKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                           "key.chunktracker.mark",
                           InputUtil.Type.KEYSYM,
@@ -184,8 +176,6 @@ jobs:
                       }
                   });
 
-                  // CHANGED FOR 1.21.11: AFTER_ENTITIES instead of END, because
-                  // context.consumers() is only guaranteed non-null there.
                   WorldRenderEvents.AFTER_ENTITIES.register(ChunkOverlayRenderer::render);
               }
           }
@@ -206,10 +196,6 @@ jobs:
 
           // This class draws the actual red boxes. It only draws lines,
           // it never touches or breaks any real blocks.
-          //
-          // REWRITTEN FOR 1.21.11: the old Tessellator + RenderSystem.setShader
-          // + BufferRenderer approach is gone in the new render pipeline.
-          // We now hand vertices to the shared line buffer instead.
           public class ChunkOverlayRenderer {
 
               public static void render(WorldRenderContext context) {
@@ -239,8 +225,6 @@ jobs:
                       double minY = bottomY - camera.y;
                       double maxY = topY - camera.y;
 
-                      // VertexRendering handles the 12 edges and the normals
-                      // that the LINES vertex format requires.
                       VertexRendering.drawBox(
                               entry, lines,
                               minX, minY, minZ,
@@ -249,7 +233,6 @@ jobs:
                       );
                   }
 
-                  // Flush now so the lines are not held until some later layer.
                   if (consumers instanceof VertexConsumerProvider.Immediate immediate) {
                       immediate.draw(RenderLayer.getLines());
                   }
@@ -260,11 +243,11 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.14'
+          gradle-version: '9.2'
 
       - name: Make the Gradle wrapper
         run: |
-          gradle wrapper --gradle-version 8.14
+          gradle wrapper --gradle-version 9.2
           chmod +x gradlew
 
       - name: Build the mod
