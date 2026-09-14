@@ -13,7 +13,7 @@ jobs:
         run: |
           mkdir -p src/main/java/com/example/chunktracker
           mkdir -p src/main/resources
-          cat > settings.gradle << 'EOF'
+          cat << 'EOF' > settings.gradle
           pluginManagement {
               repositories {
                   maven { url = "https://fabricmc.net" }
@@ -21,6 +21,10 @@ jobs:
                   gradlePluginPortal()
               }
           }
+          plugins {
+              id "fabric-loom" version "1.7-SNAPSHOT"
+          }
+          rootProject.name = "chunktracker"
           EOF
           cat > gradle.properties << 'EOF'
           minecraft_version=1.21.1
@@ -33,7 +37,7 @@ jobs:
           EOF
           cat > build.gradle << 'EOF'
           plugins {
-              id 'fabric-loom' version '1.7-SNAPSHOT'
+              id 'fabric-loom'
           }
           version = "1.0.0"
           group = "com.example.chunktracker"
