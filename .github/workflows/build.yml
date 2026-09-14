@@ -9,35 +9,35 @@ jobs:
   lookup:
     runs-on: ubuntu-latest
     steps:
-      - name: Round two lookup
+      - name: Round three lookup
         run: |
           set +e
 
           curl -sL -o fa.jar "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/0.141.6%2B1.21.11/fabric-api-0.141.6%2B1.21.11-fatjavadoc.jar"
-          mkdir -p doc
-          cd doc
-          unzip -oq ../fa.jar
+          mkdir -p doc && cd doc && unzip -oq ../fa.jar
           P=net/fabricmc/fabric/api/client/rendering/v1/world
 
-          for f in WorldRenderEvents WorldRenderContext AbstractWorldRenderContext WorldRenderEvents.DebugRender WorldRenderEvents.AfterEntities WorldRenderEvents.BeforeTranslucent WorldRenderEvents.EndMain; do
-            echo "########## FABRIC $f ##########"
-            tr '<' '\n' < "$P/$f.html" 2>/dev/null | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -40
-            echo ""
-          done
+          echo "########## WorldRenderContext PLAIN TEXT ##########"
+          sed -e 's/<[^>]*>/ /g' "$P/WorldRenderContext.html" 2>/dev/null | tr -s ' \n' ' \n' | grep -v '^ *$' | head -60
+          echo ""
+
+          echo "########## AbstractWorldRenderContext PLAIN TEXT ##########"
+          sed -e 's/<[^>]*>/ /g' "$P/AbstractWorldRenderContext.html" 2>/dev/null | tr -s ' \n' ' \n' | grep -v '^ *$' | head -60
+          echo ""
 
           cd ..
           Y="https://maven.fabricmc.net/docs/yarn-1.21.11%2Bbuild.3/net/minecraft"
 
-          echo "########## MC RenderLayer ALL METHODS ##########"
-          curl -sL "$Y/client/render/RenderLayer.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -60
+          echo "########## MC RenderLayers ALL MEMBERS ##########"
+          curl -sL "$Y/client/render/RenderLayers.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -80
           echo ""
 
-          echo "########## MC render package: classes with Line or Debug ##########"
-          curl -sL "$Y/client/render/package-summary.html" | tr '<' '\n' | grep -o 'href="[A-Za-z.]*\.html"' | sed 's/href="//; s/"//' | grep -iE 'line|debug|layer|pipeline' | sort -u | head -40
+          echo "########## MC WorldRenderState (camera?) ##########"
+          curl -sL "$Y/client/render/WorldRenderState.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -40
           echo ""
 
-          echo "########## MC VoxelShapes factory methods ##########"
-          curl -sL "$Y/util/shape/VoxelShapes.html" | tr '<' '\n' | grep -o 'href="#cuboid[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -20
+          echo "########## MC VertexRendering drawOutline FULL ##########"
+          curl -sL "$Y/client/render/VertexRendering.html" | sed -e 's/<[^>]*>/ /g' | tr -s ' \n' ' \n' | grep -A4 -i 'drawOutline' | head -30
           echo ""
 
           echo "########## DONE ##########"
