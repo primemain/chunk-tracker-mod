@@ -234,7 +234,8 @@ jobs:
                   if (matrices == null || consumers == null) return;
 
                   // The context no longer hands us the camera, so fetch it.
-                  Vec3d camera = client.gameRenderer.getCamera().getPos();
+                  // In 1.21.11 this getter is called getCameraPos, not getPos.
+                  Vec3d camera = client.gameRenderer.getCamera().getCameraPos();
                   VertexConsumer lines = consumers.getBuffer(RenderLayers.LINES);
 
                   // Bedrock to sky limit.
