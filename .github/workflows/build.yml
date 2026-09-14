@@ -1,4 +1,4 @@
-name: Find The Real API Names
+name: Build Chunk Tracker Mod
 
 on:
   workflow_dispatch:
@@ -6,46 +6,318 @@ on:
     branches: [ main ]
 
 jobs:
-  lookup:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Round four lookup
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Create all the mod files
         run: |
-          set +e
+          mkdir -p src/main/java/com/example/chunktracker
+          mkdir -p src/main/resources
 
-          curl -sL -o fa.jar "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/0.141.6%2B1.21.11/fabric-api-0.141.6%2B1.21.11-fatjavadoc.jar"
-          mkdir -p doc && cd doc && unzip -oq ../fa.jar
-          R=net/fabricmc/fabric/api/client/rendering/v1
+          cat > settings.gradle << 'EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = uri("https://maven.fabricmc.net/") }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EOF
 
-          echo "########## HudRenderCallback ##########"
-          sed -e 's/<[^>]*>/ /g' "$R/HudRenderCallback.html" 2>/dev/null | tr -s ' \n' ' \n' | grep -v '^ *$' | sed -n '25,60p'
-          echo ""
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.11
+          yarn_mappings=1.21.11+build.3
+          loader_version=0.18.1
+          fabric_version=0.141.6+1.21.11
+          mod_version=2.0.0
+          maven_group=com.example.chunktracker
+          archives_base_name=chunktracker
+          EOF
 
-          echo "########## HudElementRegistry ##########"
-          sed -e 's/<[^>]*>/ /g' "$R/HudElementRegistry.html" 2>/dev/null | tr -s ' \n' ' \n' | grep -v '^ *$' | sed -n '25,55p'
-          echo ""
+          cat > build.gradle << 'EOF'
+          plugins {
+              id 'fabric-loom' version '1.14-SNAPSHOT'
+              id 'maven-publish'
+          }
 
-          echo "########## HudElement ##########"
-          sed -e 's/<[^>]*>/ /g' "$R/HudElement.html" 2>/dev/null | tr -s ' \n' ' \n' | grep -v '^ *$' | sed -n '25,50p'
-          echo ""
+          version = project.mod_version
+          group = project.maven_group
 
-          echo "########## VanillaHudElements ##########"
-          tr '<' '\n' < "$R/VanillaHudElements.html" 2>/dev/null | grep -o 'href="#[A-Z_]*"' | sed 's/href="#//; s/"//' | sort -u | head -30
-          echo ""
+          base {
+              archivesName = project.archives_base_name
+          }
 
-          cd ..
-          Y="https://maven.fabricmc.net/docs/yarn-1.21.11%2Bbuild.3/net/minecraft"
+          repositories {
+              mavenCentral()
+          }
 
-          echo "########## VertexRendering drawFilledBox ##########"
-          curl -sL "$Y/client/render/VertexRendering.html" | sed -e 's/<[^>]*>/ /g' | tr -s ' \n' ' \n' | grep -A14 -i 'public static void drawFilledBox' | head -40
-          echo ""
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
 
-          echo "########## RenderLayers debug + translucent members ##########"
-          curl -sL "$Y/client/render/RenderLayers.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | grep -iE 'debug|translucent|line' | sort -u | head -40
-          echo ""
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
 
-          echo "########## DrawContext fill methods ##########"
-          curl -sL "$Y/client/gui/DrawContext.html" | tr '<' '\n' | grep -o 'href="#fill[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -20
-          echo ""
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
 
-          echo "########## DONE ##########"
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+          EOF
+
+          cat > src/main/resources/fabric.mod.json << 'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "chunktracker",
+            "version": "${version}",
+            "name": "Chunk Tracker",
+            "description": "Automatically marks the chunks you have walked through with a red border wall and a red screen tint.",
+            "environment": "client",
+            "license": "CC0-1.0",
+            "entrypoints": {
+              "client": [
+                "com.example.chunktracker.ChunkTracker"
+              ]
+            },
+            "depends": {
+              "fabricloader": ">=0.18.0",
+              "minecraft": "~1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ChunkTintState.java << 'EOF'
+          package com.example.chunktracker;
+
+          import java.util.HashSet;
+          import java.util.Set;
+          import net.minecraft.util.math.ChunkPos;
+
+          // Remembers which chunks you have walked through.
+          // Lives only in memory on your own client. Nothing is saved to the
+          // world, nothing is sent to the server, nothing touches real blocks.
+          public class ChunkTintState {
+              private static final Set<ChunkPos> markedChunks = new HashSet<>();
+
+              // Marks the 3x3 group of chunks centered on the given chunk.
+              public static void markChunksAroundPlayer(ChunkPos center) {
+                  for (int dx = -1; dx <= 1; dx++) {
+                      for (int dz = -1; dz <= 1; dz++) {
+                          markedChunks.add(new ChunkPos(center.x + dx, center.z + dz));
+                      }
+                  }
+              }
+
+              public static boolean isMarked(int chunkX, int chunkZ) {
+                  return markedChunks.contains(new ChunkPos(chunkX, chunkZ));
+              }
+
+              public static Set<ChunkPos> getMarkedChunks() {
+                  return markedChunks;
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ChunkTracker.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
+
+          // No key binds at all. Marking happens by itself as you walk,
+          // starting the moment you join a world.
+          public class ChunkTracker implements ClientModInitializer {
+
+              @Override
+              public void onInitializeClient() {
+                  ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                      if (client.player != null) {
+                          ChunkTintState.markChunksAroundPlayer(client.player.getChunkPos());
+                      }
+                  });
+
+                  WorldRenderEvents.AFTER_ENTITIES.register(ChunkOverlayRenderer::render);
+                  ScreenTintRenderer.register();
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ChunkOverlayRenderer.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.render.RenderLayers;
+          import net.minecraft.client.render.VertexConsumer;
+          import net.minecraft.client.render.VertexConsumerProvider;
+          import net.minecraft.client.render.VertexRendering;
+          import net.minecraft.client.util.math.MatrixStack;
+          import net.minecraft.client.world.ClientWorld;
+          import net.minecraft.util.math.ChunkPos;
+          import net.minecraft.util.math.Vec3d;
+          import net.minecraft.util.shape.VoxelShape;
+          import net.minecraft.util.shape.VoxelShapes;
+
+          // Draws the red outline for every marked chunk, plus a world-border
+          // style wall around the outside edge of the marked area.
+          // Lines and see-through walls only. No real blocks are changed.
+          public class ChunkOverlayRenderer {
+
+              private static final int OUTLINE_RED = 0xFFFF0000;
+
+              // Wall colour, 0 to 1. Last number is how see-through it is.
+              private static final float WALL_R = 1.0F;
+              private static final float WALL_G = 0.0F;
+              private static final float WALL_B = 0.0F;
+              private static final float WALL_A = 0.22F;
+
+              // How thick the border wall is, in blocks.
+              private static final double WALL = 0.35;
+
+              public static void render(WorldRenderContext context) {
+                  if (ChunkTintState.getMarkedChunks().isEmpty()) return;
+
+                  MinecraftClient client = MinecraftClient.getInstance();
+                  ClientWorld world = client.world;
+                  if (world == null) return;
+
+                  MatrixStack matrices = context.matrices();
+                  VertexConsumerProvider consumers = context.consumers();
+                  if (matrices == null || consumers == null) return;
+
+                  Vec3d camera = client.gameRenderer.getCamera().getCameraPos();
+                  double cx = camera.x;
+                  double cy = camera.y;
+                  double cz = camera.z;
+
+                  double bottomY = world.getBottomY();
+                  double topY = bottomY + world.getHeight();
+
+                  VertexConsumer lines = consumers.getBuffer(RenderLayers.LINES);
+                  VertexConsumer walls = consumers.getBuffer(RenderLayers.debugFilledBox());
+
+                  for (ChunkPos pos : ChunkTintState.getMarkedChunks()) {
+                      double minX = pos.getStartX();
+                      double minZ = pos.getStartZ();
+                      double maxX = pos.getEndX() + 1;
+                      double maxZ = pos.getEndZ() + 1;
+
+                      // The outline for this chunk.
+                      VoxelShape box = VoxelShapes.cuboidUnchecked(
+                              minX, bottomY, minZ,
+                              maxX, topY, maxZ
+                      );
+                      VertexRendering.drawOutline(
+                              matrices, lines, box,
+                              -cx, -cy, -cz,
+                              OUTLINE_RED, 1.0F
+                      );
+
+                      // A wall only goes on a side where there is no marked
+                      // chunk next door. That makes one clean border around
+                      // the whole marked area instead of walls everywhere.
+                      if (!ChunkTintState.isMarked(pos.x, pos.z - 1)) {
+                          wall(matrices, walls, minX - cx, bottomY - cy, minZ - cz,
+                                  maxX - cx, topY - cy, minZ + WALL - cz);
+                      }
+                      if (!ChunkTintState.isMarked(pos.x, pos.z + 1)) {
+                          wall(matrices, walls, minX - cx, bottomY - cy, maxZ - WALL - cz,
+                                  maxX - cx, topY - cy, maxZ - cz);
+                      }
+                      if (!ChunkTintState.isMarked(pos.x - 1, pos.z)) {
+                          wall(matrices, walls, minX - cx, bottomY - cy, minZ - cz,
+                                  minX + WALL - cx, topY - cy, maxZ - cz);
+                      }
+                      if (!ChunkTintState.isMarked(pos.x + 1, pos.z)) {
+                          wall(matrices, walls, maxX - WALL - cx, bottomY - cy, minZ - cz,
+                                  maxX - cx, topY - cy, maxZ - cz);
+                      }
+                  }
+              }
+
+              private static void wall(MatrixStack matrices, VertexConsumer buffer,
+                                       double minX, double minY, double minZ,
+                                       double maxX, double maxY, double maxZ) {
+                  VertexRendering.drawFilledBox(
+                          matrices, buffer,
+                          minX, minY, minZ,
+                          maxX, maxY, maxZ,
+                          WALL_R, WALL_G, WALL_B, WALL_A
+                  );
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ScreenTintRenderer.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+          import net.minecraft.client.MinecraftClient;
+
+          // Puts a light red wash over the screen while you are standing
+          // inside an area you have already marked.
+          public class ScreenTintRenderer {
+
+              // 0xAARRGGBB. The first two digits are how strong it is.
+              // 0x22 is light. Raise it toward 0x55 for a stronger red,
+              // lower it toward 0x11 to make it barely there.
+              private static final int TINT = 0x22FF0000;
+
+              public static void register() {
+                  HudRenderCallback.EVENT.register((drawContext, tickCounter) -> {
+                      MinecraftClient client = MinecraftClient.getInstance();
+                      if (client.player == null) return;
+
+                      int chunkX = client.player.getChunkPos().x;
+                      int chunkZ = client.player.getChunkPos().z;
+                      if (!ChunkTintState.isMarked(chunkX, chunkZ)) return;
+
+                      int width = client.getWindow().getScaledWidth();
+                      int height = client.getWindow().getScaledHeight();
+                      drawContext.fill(0, 0, width, height, TINT);
+                  });
+              }
+          }
+          EOF
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.2.1'
+
+      - name: Make the Gradle wrapper
+        run: |
+          gradle wrapper --gradle-version 9.2.1
+          chmod +x gradlew
+
+      - name: Build the mod
+        run: ./gradlew build --stacktrace
+
+      - name: Upload the finished mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunktracker-mod
+          path: build/libs/*.jar
