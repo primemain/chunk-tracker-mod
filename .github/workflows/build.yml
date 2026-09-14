@@ -9,34 +9,35 @@ jobs:
   lookup:
     runs-on: ubuntu-latest
     steps:
-      - name: Look up the real class and method names
+      - name: Round two lookup
         run: |
           set +e
 
-          echo "########## 1. FABRIC API RENDERING CLASSES ##########"
           curl -sL -o fa.jar "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/0.141.6%2B1.21.11/fabric-api-0.141.6%2B1.21.11-fatjavadoc.jar"
-          echo "downloaded bytes:"
-          wc -c < fa.jar
-          unzip -l fa.jar 2>/dev/null | grep "client/rendering" | awk '{print $NF}' | sed 's|.*/||' | grep '\.html$' | sort -u
+          mkdir -p doc
+          cd doc
+          unzip -oq ../fa.jar
+          P=net/fabricmc/fabric/api/client/rendering/v1/world
+
+          for f in WorldRenderEvents WorldRenderContext AbstractWorldRenderContext WorldRenderEvents.DebugRender WorldRenderEvents.AfterEntities WorldRenderEvents.BeforeTranslucent WorldRenderEvents.EndMain; do
+            echo "########## FABRIC $f ##########"
+            tr '<' '\n' < "$P/$f.html" 2>/dev/null | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -40
+            echo ""
+          done
+
+          cd ..
+          Y="https://maven.fabricmc.net/docs/yarn-1.21.11%2Bbuild.3/net/minecraft"
+
+          echo "########## MC RenderLayer ALL METHODS ##########"
+          curl -sL "$Y/client/render/RenderLayer.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -60
           echo ""
 
-          echo "########## 2. ANY CLASS WITH 'World' AND 'Render' ##########"
-          unzip -l fa.jar 2>/dev/null | awk '{print $NF}' | grep -i 'worldrender' | sort -u
+          echo "########## MC render package: classes with Line or Debug ##########"
+          curl -sL "$Y/client/render/package-summary.html" | tr '<' '\n' | grep -o 'href="[A-Za-z.]*\.html"' | sed 's/href="//; s/"//' | grep -iE 'line|debug|layer|pipeline' | sort -u | head -40
           echo ""
 
-          echo "########## 3. VertexRendering METHODS ##########"
-          curl -sL "https://maven.fabricmc.net/docs/yarn-1.21.11%2Bbuild.3/net/minecraft/client/render/VertexRendering.html" \
-            | tr '<' '\n' | grep -i 'drawbox\|drawfilledbox\|drawoutline' | head -40
-          echo ""
-
-          echo "########## 4. RenderLayer LINE METHODS ##########"
-          curl -sL "https://maven.fabricmc.net/docs/yarn-1.21.11%2Bbuild.3/net/minecraft/client/render/RenderLayer.html" \
-            | tr '<' '\n' | grep -i 'line' | grep -i 'get\|static' | head -40
-          echo ""
-
-          echo "########## 5. KeyBinding.Category FIELDS ##########"
-          curl -sL "https://maven.fabricmc.net/docs/yarn-1.21.11%2Bbuild.3/net/minecraft/client/option/KeyBinding.Category.html" \
-            | tr '<' '\n' | grep -E 'MISC|GAMEPLAY|MOVEMENT|create|register' | head -30
+          echo "########## MC VoxelShapes factory methods ##########"
+          curl -sL "$Y/util/shape/VoxelShapes.html" | tr '<' '\n' | grep -o 'href="#cuboid[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -20
           echo ""
 
           echo "########## DONE ##########"
