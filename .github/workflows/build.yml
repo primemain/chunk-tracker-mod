@@ -21,12 +21,12 @@ jobs:
       - name: Create all the mod files
         run: |
           mkdir -p src/main/java/com/example/chunktracker
-          mkdir -p src/main/resources/assets/chunktracker/lang
+          mkdir -p src/main/resources
 
           cat > settings.gradle << 'EOF'
           pluginManagement {
               repositories {
-                  maven { url = uri("https://maven.fabricmc.net/") }
+                  maven { url = "https://maven.fabricmc.net/" }
                   mavenCentral()
                   gradlePluginPortal()
               }
@@ -34,9 +34,9 @@ jobs:
           EOF
 
           cat > gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx2G
+          org.gradle.jvmargs=-Xmx1G
           minecraft_version=1.21.11
-          yarn_mappings=1.21.11+build.3
+          yarn_mappings=1.21.11+build.6
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
           mod_version=1.0.0
@@ -53,10 +53,6 @@ jobs:
           version = project.mod_version
           group = project.maven_group
 
-          base {
-              archivesName = project.archives_base_name
-          }
-
           repositories {
               mavenCentral()
           }
@@ -71,10 +67,6 @@ jobs:
           java {
               sourceCompatibility = JavaVersion.VERSION_21
               targetCompatibility = JavaVersion.VERSION_21
-          }
-
-          tasks.withType(JavaCompile).configureEach {
-              it.options.release = 21
           }
 
           processResources {
@@ -100,17 +92,11 @@ jobs:
               ]
             },
             "depends": {
-              "fabricloader": ">=0.18.0",
+              "fabricloader": ">=0.18.1",
               "minecraft": "~1.21.11",
               "java": ">=21",
               "fabric-api": "*"
             }
-          }
-          EOF
-
-          cat > src/main/resources/assets/chunktracker/lang/en_us.json << 'EOF'
-          {
-            "key.chunktracker.mark": "Mark Chunks Around Me"
           }
           EOF
 
@@ -164,7 +150,7 @@ jobs:
                           "key.chunktracker.mark",
                           InputUtil.Type.KEYSYM,
                           GLFW.GLFW_KEY_G,
-                          KeyBinding.Category.MISC
+                          "key.categories.chunktracker"
                   ));
 
                   ClientTickEvents.END_CLIENT_TICK.register(client -> {
@@ -176,7 +162,7 @@ jobs:
                       }
                   });
 
-                  WorldRenderEvents.AFTER_ENTITIES.register(ChunkOverlayRenderer::render);
+                  WorldRenderEvents.END.register(ChunkOverlayRenderer::render);
               }
           }
           EOF
@@ -184,15 +170,19 @@ jobs:
           cat > src/main/java/com/example/chunktracker/ChunkOverlayRenderer.java << 'EOF'
           package com.example.chunktracker;
 
+          import com.mojang.blaze3d.systems.RenderSystem;
           import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-          import net.minecraft.client.render.RenderLayer;
-          import net.minecraft.client.render.VertexConsumer;
-          import net.minecraft.client.render.VertexConsumerProvider;
-          import net.minecraft.client.render.VertexRendering;
+          import net.minecraft.client.render.BufferBuilder;
+          import net.minecraft.client.render.BufferRenderer;
+          import net.minecraft.client.render.GameRenderer;
+          import net.minecraft.client.render.Tessellator;
+          import net.minecraft.client.render.VertexFormat;
+          import net.minecraft.client.render.VertexFormats;
           import net.minecraft.client.util.math.MatrixStack;
           import net.minecraft.util.math.ChunkPos;
           import net.minecraft.util.math.Vec3d;
           import net.minecraft.world.World;
+          import org.joml.Matrix4f;
 
           // This class draws the actual red boxes. It only draws lines,
           // it never touches or breaks any real blocks.
@@ -204,18 +194,24 @@ jobs:
                   World world = context.world();
                   if (world == null) return;
 
+                  Vec3d camera = context.camera().getPos();
                   MatrixStack matrices = context.matrixStack();
                   if (matrices == null) return;
 
-                  VertexConsumerProvider consumers = context.consumers();
-                  if (consumers == null) return;
-
-                  Vec3d camera = context.camera().getPos();
-                  VertexConsumer lines = consumers.getBuffer(RenderLayer.getLines());
-                  MatrixStack.Entry entry = matrices.peek();
-
                   int bottomY = world.getBottomY();
                   int topY = bottomY + world.getHeight();
+
+                  RenderSystem.enableBlend();
+                  RenderSystem.defaultBlendFunc();
+                  RenderSystem.setShader(GameRenderer::getPositionColorProgram);
+                  RenderSystem.lineWidth(3.0f);
+                  RenderSystem.disableDepthTest();
+
+                  Tessellator tessellator = Tessellator.getInstance();
+                  BufferBuilder buffer = tessellator.begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
+
+                  matrices.push();
+                  Matrix4f matrix = matrices.peek().getPositionMatrix();
 
                   for (ChunkPos pos : ChunkTintState.getMarkedChunks()) {
                       double minX = pos.getStartX() - camera.x;
@@ -225,33 +221,66 @@ jobs:
                       double minY = bottomY - camera.y;
                       double maxY = topY - camera.y;
 
-                      VertexRendering.drawBox(
-                              entry, lines,
-                              minX, minY, minZ,
-                              maxX, maxY, maxZ,
-                              1.0f, 0.0f, 0.0f, 0.9f
-                      );
+                      drawBox(buffer, matrix, minX, minY, minZ, maxX, maxY, maxZ);
                   }
 
-                  if (consumers instanceof VertexConsumerProvider.Immediate immediate) {
-                      immediate.draw(RenderLayer.getLines());
-                  }
+                  matrices.pop();
+
+                  BufferRenderer.drawWithGlobalProgram(buffer.end());
+
+                  RenderSystem.enableDepthTest();
+                  RenderSystem.lineWidth(1.0f);
+                  RenderSystem.disableBlend();
+              }
+
+              private static void drawBox(BufferBuilder buffer, Matrix4f matrix,
+                                           double x1, double y1, double z1,
+                                           double x2, double y2, double z2) {
+                  float fx1 = (float) x1, fy1 = (float) y1, fz1 = (float) z1;
+                  float fx2 = (float) x2, fy2 = (float) y2, fz2 = (float) z2;
+                  float r = 1f, g = 0f, b = 0f, a = 0.9f;
+
+                  // bottom square
+                  line(buffer, matrix, fx1, fy1, fz1, fx2, fy1, fz1, r, g, b, a);
+                  line(buffer, matrix, fx2, fy1, fz1, fx2, fy1, fz2, r, g, b, a);
+                  line(buffer, matrix, fx2, fy1, fz2, fx1, fy1, fz2, r, g, b, a);
+                  line(buffer, matrix, fx1, fy1, fz2, fx1, fy1, fz1, r, g, b, a);
+
+                  // top square
+                  line(buffer, matrix, fx1, fy2, fz1, fx2, fy2, fz1, r, g, b, a);
+                  line(buffer, matrix, fx2, fy2, fz1, fx2, fy2, fz2, r, g, b, a);
+                  line(buffer, matrix, fx2, fy2, fz2, fx1, fy2, fz2, r, g, b, a);
+                  line(buffer, matrix, fx1, fy2, fz2, fx1, fy2, fz1, r, g, b, a);
+
+                  // the four vertical corner lines
+                  line(buffer, matrix, fx1, fy1, fz1, fx1, fy2, fz1, r, g, b, a);
+                  line(buffer, matrix, fx2, fy1, fz1, fx2, fy2, fz1, r, g, b, a);
+                  line(buffer, matrix, fx2, fy1, fz2, fx2, fy2, fz2, r, g, b, a);
+                  line(buffer, matrix, fx1, fy1, fz2, fx1, fy2, fz2, r, g, b, a);
+              }
+
+              private static void line(BufferBuilder buffer, Matrix4f matrix,
+                                        float x1, float y1, float z1,
+                                        float x2, float y2, float z2,
+                                        float r, float g, float b, float a) {
+                  buffer.vertex(matrix, x1, y1, z1).color(r, g, b, a);
+                  buffer.vertex(matrix, x2, y2, z2).color(r, g, b, a);
               }
           }
           EOF
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.10
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.2.1'
+          gradle-version: '8.10'
 
       - name: Make the Gradle wrapper
         run: |
-          gradle wrapper --gradle-version 9.2.1
+          gradle wrapper --gradle-version 8.10
           chmod +x gradlew
 
       - name: Build the mod
-        run: ./gradlew build --stacktrace
+        run: ./gradlew build
 
       - name: Upload the finished mod jar
         uses: actions/upload-artifact@v4
