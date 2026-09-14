@@ -1,4 +1,4 @@
-name: Find The Real API Names
+name: Build Chunk Tracker Mod
 
 on:
   workflow_dispatch:
@@ -6,38 +6,279 @@ on:
     branches: [ main ]
 
 jobs:
-  lookup:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Round three lookup
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Create all the mod files
         run: |
-          set +e
+          mkdir -p src/main/java/com/example/chunktracker
+          mkdir -p src/main/resources/assets/chunktracker/lang
 
-          curl -sL -o fa.jar "https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/0.141.6%2B1.21.11/fabric-api-0.141.6%2B1.21.11-fatjavadoc.jar"
-          mkdir -p doc && cd doc && unzip -oq ../fa.jar
-          P=net/fabricmc/fabric/api/client/rendering/v1/world
+          cat > settings.gradle << 'EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = uri("https://maven.fabricmc.net/") }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EOF
 
-          echo "########## WorldRenderContext PLAIN TEXT ##########"
-          sed -e 's/<[^>]*>/ /g' "$P/WorldRenderContext.html" 2>/dev/null | tr -s ' \n' ' \n' | grep -v '^ *$' | head -60
-          echo ""
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.11
+          yarn_mappings=1.21.11+build.3
+          loader_version=0.18.1
+          fabric_version=0.141.6+1.21.11
+          mod_version=1.0.0
+          maven_group=com.example.chunktracker
+          archives_base_name=chunktracker
+          EOF
 
-          echo "########## AbstractWorldRenderContext PLAIN TEXT ##########"
-          sed -e 's/<[^>]*>/ /g' "$P/AbstractWorldRenderContext.html" 2>/dev/null | tr -s ' \n' ' \n' | grep -v '^ *$' | head -60
-          echo ""
+          cat > build.gradle << 'EOF'
+          plugins {
+              id 'fabric-loom' version '1.14-SNAPSHOT'
+              id 'maven-publish'
+          }
 
-          cd ..
-          Y="https://maven.fabricmc.net/docs/yarn-1.21.11%2Bbuild.3/net/minecraft"
+          version = project.mod_version
+          group = project.maven_group
 
-          echo "########## MC RenderLayers ALL MEMBERS ##########"
-          curl -sL "$Y/client/render/RenderLayers.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -80
-          echo ""
+          base {
+              archivesName = project.archives_base_name
+          }
 
-          echo "########## MC WorldRenderState (camera?) ##########"
-          curl -sL "$Y/client/render/WorldRenderState.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | sort -u | head -40
-          echo ""
+          repositories {
+              mavenCentral()
+          }
 
-          echo "########## MC VertexRendering drawOutline FULL ##########"
-          curl -sL "$Y/client/render/VertexRendering.html" | sed -e 's/<[^>]*>/ /g' | tr -s ' \n' ' \n' | grep -A4 -i 'drawOutline' | head -30
-          echo ""
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
 
-          echo "########## DONE ##########"
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+          EOF
+
+          cat > src/main/resources/fabric.mod.json << 'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "chunktracker",
+            "version": "${version}",
+            "name": "Chunk Tracker",
+            "description": "Press G to mark the 3x3 chunk area around you with a red box from bedrock to sky.",
+            "environment": "client",
+            "license": "CC0-1.0",
+            "entrypoints": {
+              "client": [
+                "com.example.chunktracker.ChunkTracker"
+              ]
+            },
+            "depends": {
+              "fabricloader": ">=0.18.0",
+              "minecraft": "~1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+
+          cat > src/main/resources/assets/chunktracker/lang/en_us.json << 'EOF'
+          {
+            "key.chunktracker.mark": "Mark 3x3 Chunks Around Me",
+            "key.chunktracker.clear": "Clear All Chunk Marks"
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ChunkTintState.java << 'EOF'
+          package com.example.chunktracker;
+
+          import java.util.HashSet;
+          import java.util.Set;
+          import net.minecraft.util.math.ChunkPos;
+
+          // Remembers which chunks you have marked with G.
+          // Lives only in memory on your own client. Nothing is saved to the
+          // world, nothing is sent to the server, nothing touches real blocks.
+          public class ChunkTintState {
+              private static final Set<ChunkPos> markedChunks = new HashSet<>();
+
+              // Marks the 3x3 group of chunks centered on the given chunk.
+              public static void markChunksAroundPlayer(ChunkPos center) {
+                  for (int dx = -1; dx <= 1; dx++) {
+                      for (int dz = -1; dz <= 1; dz++) {
+                          markedChunks.add(new ChunkPos(center.x + dx, center.z + dz));
+                      }
+                  }
+              }
+
+              public static void clear() {
+                  markedChunks.clear();
+              }
+
+              public static Set<ChunkPos> getMarkedChunks() {
+                  return markedChunks;
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ChunkTracker.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.util.InputUtil;
+          import net.minecraft.util.math.ChunkPos;
+          import org.lwjgl.glfw.GLFW;
+
+          // Sets up the G key (mark) and the J key (clear), and hooks the
+          // renderer into the world render pass.
+          public class ChunkTracker implements ClientModInitializer {
+
+              private static KeyBinding markKey;
+              private static KeyBinding clearKey;
+
+              @Override
+              public void onInitializeClient() {
+                  markKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                          "key.chunktracker.mark",
+                          InputUtil.Type.KEYSYM,
+                          GLFW.GLFW_KEY_G,
+                          KeyBinding.Category.MISC
+                  ));
+
+                  clearKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                          "key.chunktracker.clear",
+                          InputUtil.Type.KEYSYM,
+                          GLFW.GLFW_KEY_J,
+                          KeyBinding.Category.MISC
+                  ));
+
+                  ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                      while (markKey.wasPressed()) {
+                          if (client.player != null) {
+                              ChunkPos current = client.player.getChunkPos();
+                              ChunkTintState.markChunksAroundPlayer(current);
+                          }
+                      }
+                      while (clearKey.wasPressed()) {
+                          ChunkTintState.clear();
+                      }
+                  });
+
+                  WorldRenderEvents.AFTER_ENTITIES.register(ChunkOverlayRenderer::render);
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ChunkOverlayRenderer.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.render.RenderLayers;
+          import net.minecraft.client.render.VertexConsumer;
+          import net.minecraft.client.render.VertexConsumerProvider;
+          import net.minecraft.client.render.VertexRendering;
+          import net.minecraft.client.util.math.MatrixStack;
+          import net.minecraft.client.world.ClientWorld;
+          import net.minecraft.util.math.ChunkPos;
+          import net.minecraft.util.math.Vec3d;
+          import net.minecraft.util.shape.VoxelShape;
+          import net.minecraft.util.shape.VoxelShapes;
+
+          // Draws the red boxes. Lines only - it never places, breaks or
+          // changes a single real block, so you cannot fall through anything.
+          public class ChunkOverlayRenderer {
+
+              // Solid red, fully opaque. Format is 0xAARRGGBB.
+              private static final int RED = 0xFFFF0000;
+
+              public static void render(WorldRenderContext context) {
+                  if (ChunkTintState.getMarkedChunks().isEmpty()) return;
+
+                  MinecraftClient client = MinecraftClient.getInstance();
+                  ClientWorld world = client.world;
+                  if (world == null) return;
+
+                  MatrixStack matrices = context.matrices();
+                  VertexConsumerProvider consumers = context.consumers();
+                  if (matrices == null || consumers == null) return;
+
+                  // The context no longer hands us the camera, so fetch it.
+                  Vec3d camera = client.gameRenderer.getCamera().getPos();
+                  VertexConsumer lines = consumers.getBuffer(RenderLayers.LINES);
+
+                  // Bedrock to sky limit.
+                  double bottomY = world.getBottomY();
+                  double topY = bottomY + world.getHeight();
+
+                  for (ChunkPos pos : ChunkTintState.getMarkedChunks()) {
+                      double minX = pos.getStartX();
+                      double minZ = pos.getStartZ();
+                      double maxX = pos.getEndX() + 1;
+                      double maxZ = pos.getEndZ() + 1;
+
+                      VoxelShape box = VoxelShapes.cuboidUnchecked(
+                              minX, bottomY, minZ,
+                              maxX, topY, maxZ
+                      );
+
+                      // Offsets shift the shape from world space into
+                      // camera-relative space, which is what the renderer wants.
+                      VertexRendering.drawOutline(
+                              matrices, lines, box,
+                              -camera.x, -camera.y, -camera.z,
+                              RED, 1.0F
+                      );
+                  }
+              }
+          }
+          EOF
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.2.1'
+
+      - name: Make the Gradle wrapper
+        run: |
+          gradle wrapper --gradle-version 9.2.1
+          chmod +x gradlew
+
+      - name: Build the mod
+        run: ./gradlew build --stacktrace
+
+      - name: Upload the finished mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunktracker-mod
+          path: build/libs/*.jar
