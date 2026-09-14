@@ -21,7 +21,7 @@ jobs:
       - name: Create all the mod files
         run: |
           mkdir -p src/main/java/com/example/chunktracker
-          mkdir -p src/main/resources
+          mkdir -p src/main/resources/assets/chunktracker/lang
 
           cat > settings.gradle << 'EOF'
           pluginManagement {
@@ -33,14 +33,14 @@ jobs:
           }
           EOF
 
-          # Build-time versions stay on OFFICIAL 1.21.1 artifacts.
-          # These only affect compilation — they are never checked at runtime.
+          # Everything now targets 1.21.11, matching the modpack.
+          # fabric_version is the exact build the pack already loads.
           cat > gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx1G
-          minecraft_version=1.21.1
-          yarn_mappings=1.21.1+build.3
-          loader_version=0.16.9
-          fabric_version=0.107.0+1.21.1
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.11
+          yarn_mappings=1.21.11+build.3
+          loader_version=0.18.1
+          fabric_version=0.141.6+1.21.11
           mod_version=1.0.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
@@ -48,7 +48,7 @@ jobs:
 
           cat > build.gradle << 'EOF'
           plugins {
-              id 'fabric-loom' version '1.7-SNAPSHOT'
+              id 'fabric-loom' version '1.14-SNAPSHOT'
               id 'maven-publish'
           }
 
@@ -79,8 +79,6 @@ jobs:
               it.options.release = 21
           }
 
-          // NOTE: only "version" is expanded here. Do not add minecraft_version
-          // to this list, or it will overwrite the wildcard in fabric.mod.json.
           processResources {
               inputs.property "version", project.version
               filesMatching("fabric.mod.json") {
@@ -89,8 +87,8 @@ jobs:
           }
           EOF
 
-          # Runtime dependency is a wildcard so Fabric Loader will not reject
-          # the renamed "1.21.11" game version reported by the modpack.
+          # Pinned to 1.21.11 now that the mod is actually compiled against it.
+          # The wildcard is gone on purpose: it hid a real incompatibility.
           cat > src/main/resources/fabric.mod.json << 'EOF'
           {
             "schemaVersion": 1,
@@ -106,11 +104,17 @@ jobs:
               ]
             },
             "depends": {
-              "fabricloader": ">=0.16.9",
-              "minecraft": "*",
+              "fabricloader": ">=0.18.0",
+              "minecraft": "~1.21.11",
               "java": ">=21",
               "fabric-api": "*"
             }
+          }
+          EOF
+
+          cat > src/main/resources/assets/chunktracker/lang/en_us.json << 'EOF'
+          {
+            "key.chunktracker.mark": "Mark Chunks Around Me"
           }
           EOF
 
@@ -160,11 +164,15 @@ jobs:
 
               @Override
               public void onInitializeClient() {
+                  // CHANGED FOR 1.21.11: the last argument used to be a plain
+                  // String category. Since 1.21.9 it is a KeyBinding.Category
+                  // object. Using the built-in MISC category avoids needing to
+                  // register a custom one.
                   markKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                           "key.chunktracker.mark",
                           InputUtil.Type.KEYSYM,
                           GLFW.GLFW_KEY_G,
-                          "key.categories.chunktracker"
+                          KeyBinding.Category.MISC
                   ));
 
                   ClientTickEvents.END_CLIENT_TICK.register(client -> {
@@ -176,7 +184,9 @@ jobs:
                       }
                   });
 
-                  WorldRenderEvents.END.register(ChunkOverlayRenderer::render);
+                  // CHANGED FOR 1.21.11: AFTER_ENTITIES instead of END, because
+                  // context.consumers() is only guaranteed non-null there.
+                  WorldRenderEvents.AFTER_ENTITIES.register(ChunkOverlayRenderer::render);
               }
           }
           EOF
@@ -184,22 +194,22 @@ jobs:
           cat > src/main/java/com/example/chunktracker/ChunkOverlayRenderer.java << 'EOF'
           package com.example.chunktracker;
 
-          import com.mojang.blaze3d.systems.RenderSystem;
           import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-          import net.minecraft.client.render.BufferBuilder;
-          import net.minecraft.client.render.BufferRenderer;
-          import net.minecraft.client.render.GameRenderer;
-          import net.minecraft.client.render.Tessellator;
-          import net.minecraft.client.render.VertexFormat;
-          import net.minecraft.client.render.VertexFormats;
+          import net.minecraft.client.render.RenderLayer;
+          import net.minecraft.client.render.VertexConsumer;
+          import net.minecraft.client.render.VertexConsumerProvider;
+          import net.minecraft.client.render.VertexRendering;
           import net.minecraft.client.util.math.MatrixStack;
           import net.minecraft.util.math.ChunkPos;
           import net.minecraft.util.math.Vec3d;
           import net.minecraft.world.World;
-          import org.joml.Matrix4f;
 
           // This class draws the actual red boxes. It only draws lines,
           // it never touches or breaks any real blocks.
+          //
+          // REWRITTEN FOR 1.21.11: the old Tessellator + RenderSystem.setShader
+          // + BufferRenderer approach is gone in the new render pipeline.
+          // We now hand vertices to the shared line buffer instead.
           public class ChunkOverlayRenderer {
 
               public static void render(WorldRenderContext context) {
@@ -208,24 +218,18 @@ jobs:
                   World world = context.world();
                   if (world == null) return;
 
-                  Vec3d camera = context.camera().getPos();
                   MatrixStack matrices = context.matrixStack();
                   if (matrices == null) return;
 
+                  VertexConsumerProvider consumers = context.consumers();
+                  if (consumers == null) return;
+
+                  Vec3d camera = context.camera().getPos();
+                  VertexConsumer lines = consumers.getBuffer(RenderLayer.getLines());
+                  MatrixStack.Entry entry = matrices.peek();
+
                   int bottomY = world.getBottomY();
                   int topY = bottomY + world.getHeight();
-
-                  RenderSystem.enableBlend();
-                  RenderSystem.defaultBlendFunc();
-                  RenderSystem.setShader(GameRenderer::getPositionColorProgram);
-                  RenderSystem.lineWidth(3.0f);
-                  RenderSystem.disableDepthTest();
-
-                  Tessellator tessellator = Tessellator.getInstance();
-                  BufferBuilder buffer = tessellator.begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
-
-                  matrices.push();
-                  Matrix4f matrix = matrices.peek().getPositionMatrix();
 
                   for (ChunkPos pos : ChunkTintState.getMarkedChunks()) {
                       double minX = pos.getStartX() - camera.x;
@@ -235,66 +239,36 @@ jobs:
                       double minY = bottomY - camera.y;
                       double maxY = topY - camera.y;
 
-                      drawBox(buffer, matrix, minX, minY, minZ, maxX, maxY, maxZ);
+                      // VertexRendering handles the 12 edges and the normals
+                      // that the LINES vertex format requires.
+                      VertexRendering.drawBox(
+                              entry, lines,
+                              minX, minY, minZ,
+                              maxX, maxY, maxZ,
+                              1.0f, 0.0f, 0.0f, 0.9f
+                      );
                   }
 
-                  matrices.pop();
-
-                  BufferRenderer.drawWithGlobalProgram(buffer.end());
-
-                  RenderSystem.enableDepthTest();
-                  RenderSystem.lineWidth(1.0f);
-                  RenderSystem.disableBlend();
-              }
-
-              private static void drawBox(BufferBuilder buffer, Matrix4f matrix,
-                                           double x1, double y1, double z1,
-                                           double x2, double y2, double z2) {
-                  float fx1 = (float) x1, fy1 = (float) y1, fz1 = (float) z1;
-                  float fx2 = (float) x2, fy2 = (float) y2, fz2 = (float) z2;
-                  float r = 1f, g = 0f, b = 0f, a = 0.9f;
-
-                  // bottom square
-                  line(buffer, matrix, fx1, fy1, fz1, fx2, fy1, fz1, r, g, b, a);
-                  line(buffer, matrix, fx2, fy1, fz1, fx2, fy1, fz2, r, g, b, a);
-                  line(buffer, matrix, fx2, fy1, fz2, fx1, fy1, fz2, r, g, b, a);
-                  line(buffer, matrix, fx1, fy1, fz2, fx1, fy1, fz1, r, g, b, a);
-
-                  // top square
-                  line(buffer, matrix, fx1, fy2, fz1, fx2, fy2, fz1, r, g, b, a);
-                  line(buffer, matrix, fx2, fy2, fz1, fx2, fy2, fz2, r, g, b, a);
-                  line(buffer, matrix, fx2, fy2, fz2, fx1, fy2, fz2, r, g, b, a);
-                  line(buffer, matrix, fx1, fy2, fz2, fx1, fy2, fz1, r, g, b, a);
-
-                  // the four vertical corner lines
-                  line(buffer, matrix, fx1, fy1, fz1, fx1, fy2, fz1, r, g, b, a);
-                  line(buffer, matrix, fx2, fy1, fz1, fx2, fy2, fz1, r, g, b, a);
-                  line(buffer, matrix, fx2, fy1, fz2, fx2, fy2, fz2, r, g, b, a);
-                  line(buffer, matrix, fx1, fy1, fz2, fx1, fy2, fz2, r, g, b, a);
-              }
-
-              private static void line(BufferBuilder buffer, Matrix4f matrix,
-                                        float x1, float y1, float z1,
-                                        float x2, float y2, float z2,
-                                        float r, float g, float b, float a) {
-                  buffer.vertex(matrix, x1, y1, z1).color(r, g, b, a);
-                  buffer.vertex(matrix, x2, y2, z2).color(r, g, b, a);
+                  // Flush now so the lines are not held until some later layer.
+                  if (consumers instanceof VertexConsumerProvider.Immediate immediate) {
+                      immediate.draw(RenderLayer.getLines());
+                  }
               }
           }
           EOF
 
-      - name: Set up Gradle 8.10
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.10'
+          gradle-version: '8.14'
 
       - name: Make the Gradle wrapper
         run: |
-          gradle wrapper --gradle-version 8.10
+          gradle wrapper --gradle-version 8.14
           chmod +x gradlew
 
       - name: Build the mod
-        run: ./gradlew build
+        run: ./gradlew build --stacktrace
 
       - name: Upload the finished mod jar
         uses: actions/upload-artifact@v4
