@@ -1,32 +1,42 @@
-name: Build Mod
-on: [workflow_dispatch, push]
+name: Build Chunk Tracker Mod
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v5
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
-      - name: Files
+
+      - name: Create all the mod files
         run: |
           mkdir -p src/main/java/com/example/chunktracker
           mkdir -p src/main/resources
-          cat << 'EOF' > settings.gradle
+
+          cat > settings.gradle << 'EOF'
           pluginManagement {
               repositories {
-                  maven { url = "https://fabricmc.net" }
+                  maven { url = "https://maven.fabricmc.net/" }
                   mavenCentral()
                   gradlePluginPortal()
               }
           }
-          plugins {
-              id "fabric-loom" version "1.7-SNAPSHOT"
-          }
-          rootProject.name = "chunktracker"
           EOF
+
+          # Build-time versions stay on OFFICIAL 1.21.1 artifacts.
+          # These only affect compilation — they are never checked at runtime.
           cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx1G
           minecraft_version=1.21.1
           yarn_mappings=1.21.1+build.3
           loader_version=0.16.9
@@ -35,148 +45,259 @@ jobs:
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
+
           cat > build.gradle << 'EOF'
           plugins {
-              id 'fabric-loom'
+              id 'fabric-loom' version '1.7-SNAPSHOT'
+              id 'maven-publish'
           }
-          version = "1.0.0"
-          group = "com.example.chunktracker"
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          repositories {
+              mavenCentral()
+          }
+
           dependencies {
               minecraft "com.mojang:minecraft:${project.minecraft_version}"
               mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
               modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
               modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
           }
-          java { sourceCompatibility = 21; targetCompatibility = 21 }
+
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
+
+          // NOTE: only "version" is expanded here. Do not add minecraft_version
+          // to this list, or it will overwrite the wildcard in fabric.mod.json.
           processResources {
               inputs.property "version", project.version
-              filesMatching("fabric.mod.json") { expand "version": project.version }
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
           }
           EOF
+
+          # Runtime dependency is a wildcard so Fabric Loader will not reject
+          # the renamed "1.21.11" game version reported by the modpack.
           cat > src/main/resources/fabric.mod.json << 'EOF'
           {
             "schemaVersion": 1,
             "id": "chunktracker",
-            "version": "1.0.0",
+            "version": "${version}",
             "name": "Chunk Tracker",
-            "description": "Tracker",
+            "description": "Draws a red box around chunks you have visited when you press G",
             "environment": "client",
-            "entrypoints": { "client": ["com.example.chunktracker.ChunkTracker"] },
-            "depends": { "fabricloader": ">=0.16.9", "minecraft": "*", "java": ">=21", "fabric-api": "*" }
+            "license": "CC0-1.0",
+            "entrypoints": {
+              "client": [
+                "com.example.chunktracker.ChunkTracker"
+              ]
+            },
+            "depends": {
+              "fabricloader": ">=0.16.9",
+              "minecraft": "*",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
           }
           EOF
+
           cat > src/main/java/com/example/chunktracker/ChunkTintState.java << 'EOF'
           package com.example.chunktracker;
+
           import java.util.HashSet;
           import java.util.Set;
           import net.minecraft.util.math.ChunkPos;
+
+          // This class just remembers which chunks you have marked with G.
           public class ChunkTintState {
-              private static final Set<ChunkPos> marked = new HashSet<>();
-              public static void mark(ChunkPos center) {
+              private static final Set<ChunkPos> markedChunks = new HashSet<>();
+
+              // Marks the 3x3 group of chunks around the given chunk.
+              public static void markChunksAroundPlayer(ChunkPos center) {
                   for (int dx = -1; dx <= 1; dx++) {
                       for (int dz = -1; dz <= 1; dz++) {
-                          marked.add(new ChunkPos(center.x + dx, center.z + dz));
+                          markedChunks.add(new ChunkPos(center.x + dx, center.z + dz));
                       }
                   }
               }
-              public static Set<ChunkPos> getMarked() { return marked; }
+
+              public static Set<ChunkPos> getMarkedChunks() {
+                  return markedChunks;
+              }
           }
           EOF
+
           cat > src/main/java/com/example/chunktracker/ChunkTracker.java << 'EOF'
           package com.example.chunktracker;
+
           import net.fabricmc.api.ClientModInitializer;
           import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
           import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
           import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
           import net.minecraft.client.option.KeyBinding;
           import net.minecraft.client.util.InputUtil;
+          import net.minecraft.util.math.ChunkPos;
           import org.lwjgl.glfw.GLFW;
+
+          // This is the main entry point of the mod. It sets up the G key
+          // and tells the game to render the boxes every frame.
           public class ChunkTracker implements ClientModInitializer {
-              private static KeyBinding key;
+
+              private static KeyBinding markKey;
+
               @Override
               public void onInitializeClient() {
-                  key = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.tracker.mark", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_G, "key.categories.tracker"));
+                  markKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                          "key.chunktracker.mark",
+                          InputUtil.Type.KEYSYM,
+                          GLFW.GLFW_KEY_G,
+                          "key.categories.chunktracker"
+                  ));
+
                   ClientTickEvents.END_CLIENT_TICK.register(client -> {
-                      while (key.wasPressed() && client.player != null) {
-                          ChunkTintState.mark(client.player.getChunkPos());
+                      while (markKey.wasPressed()) {
+                          if (client.player != null) {
+                              ChunkPos current = client.player.getChunkPos();
+                              ChunkTintState.markChunksAroundPlayer(current);
+                          }
                       }
                   });
+
                   WorldRenderEvents.END.register(ChunkOverlayRenderer::render);
               }
           }
           EOF
+
           cat > src/main/java/com/example/chunktracker/ChunkOverlayRenderer.java << 'EOF'
           package com.example.chunktracker;
+
           import com.mojang.blaze3d.systems.RenderSystem;
           import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-          import net.minecraft.client.render.*;
+          import net.minecraft.client.render.BufferBuilder;
+          import net.minecraft.client.render.BufferRenderer;
+          import net.minecraft.client.render.GameRenderer;
+          import net.minecraft.client.render.Tessellator;
+          import net.minecraft.client.render.VertexFormat;
+          import net.minecraft.client.render.VertexFormats;
           import net.minecraft.client.util.math.MatrixStack;
           import net.minecraft.util.math.ChunkPos;
           import net.minecraft.util.math.Vec3d;
           import net.minecraft.world.World;
           import org.joml.Matrix4f;
+
+          // This class draws the actual red boxes. It only draws lines,
+          // it never touches or breaks any real blocks.
           public class ChunkOverlayRenderer {
-              public static void render(WorldRenderContext ctx) {
-                  if (ChunkTintState.getMarked().isEmpty()) return;
-                  World world = ctx.world();
-                  MatrixStack stack = ctx.matrixStack();
-                  if (world == null || stack == null) return;
-                  Vec3d cam = ctx.camera().getPos();
-                  int bY = world.getBottomY(), tY = bY + world.getHeight();
+
+              public static void render(WorldRenderContext context) {
+                  if (ChunkTintState.getMarkedChunks().isEmpty()) return;
+
+                  World world = context.world();
+                  if (world == null) return;
+
+                  Vec3d camera = context.camera().getPos();
+                  MatrixStack matrices = context.matrixStack();
+                  if (matrices == null) return;
+
+                  int bottomY = world.getBottomY();
+                  int topY = bottomY + world.getHeight();
+
                   RenderSystem.enableBlend();
                   RenderSystem.defaultBlendFunc();
                   RenderSystem.setShader(GameRenderer::getPositionColorProgram);
                   RenderSystem.lineWidth(3.0f);
                   RenderSystem.disableDepthTest();
-                  Tessellator ts = Tessellator.getInstance();
-                  BufferBuilder buf = ts.begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
-                  stack.push();
-                  Matrix4f mat = stack.peek().getPositionMatrix();
-                  float r=1f, g=0f, b=0f, a=1f;
-                  for (ChunkPos pos : ChunkTintState.getMarked()) {
-                      double x0 = pos.getStartX() - cam.x, z0 = pos.getStartZ() - cam.z;
-                      double x1 = pos.getEndX() + 1 - cam.x, z1 = pos.getEndZ() + 1 - cam.z;
-                      buf.vertex(mat, (float)x0, bY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, tY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, bY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, tY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, bY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, tY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, bY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, tY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, bY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, bY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, bY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, bY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, bY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, bY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, bY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, bY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, tY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, tY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, tY, (float)z0).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, tY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x1, tY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, tY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, tY, (float)z1).color(r, g, b, a);
-                      buf.vertex(mat, (float)x0, tY, (float)z0).color(r, g, b, a);
+
+                  Tessellator tessellator = Tessellator.getInstance();
+                  BufferBuilder buffer = tessellator.begin(VertexFormat.DrawMode.LINES, VertexFormats.POSITION_COLOR);
+
+                  matrices.push();
+                  Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+                  for (ChunkPos pos : ChunkTintState.getMarkedChunks()) {
+                      double minX = pos.getStartX() - camera.x;
+                      double minZ = pos.getStartZ() - camera.z;
+                      double maxX = pos.getEndX() + 1 - camera.x;
+                      double maxZ = pos.getEndZ() + 1 - camera.z;
+                      double minY = bottomY - camera.y;
+                      double maxY = topY - camera.y;
+
+                      drawBox(buffer, matrix, minX, minY, minZ, maxX, maxY, maxZ);
                   }
-                  BufferRenderer.drawWithGlobalProgram(buf.end());
-                  stack.pop();
+
+                  matrices.pop();
+
+                  BufferRenderer.drawWithGlobalProgram(buffer.end());
+
                   RenderSystem.enableDepthTest();
+                  RenderSystem.lineWidth(1.0f);
                   RenderSystem.disableBlend();
+              }
+
+              private static void drawBox(BufferBuilder buffer, Matrix4f matrix,
+                                           double x1, double y1, double z1,
+                                           double x2, double y2, double z2) {
+                  float fx1 = (float) x1, fy1 = (float) y1, fz1 = (float) z1;
+                  float fx2 = (float) x2, fy2 = (float) y2, fz2 = (float) z2;
+                  float r = 1f, g = 0f, b = 0f, a = 0.9f;
+
+                  // bottom square
+                  line(buffer, matrix, fx1, fy1, fz1, fx2, fy1, fz1, r, g, b, a);
+                  line(buffer, matrix, fx2, fy1, fz1, fx2, fy1, fz2, r, g, b, a);
+                  line(buffer, matrix, fx2, fy1, fz2, fx1, fy1, fz2, r, g, b, a);
+                  line(buffer, matrix, fx1, fy1, fz2, fx1, fy1, fz1, r, g, b, a);
+
+                  // top square
+                  line(buffer, matrix, fx1, fy2, fz1, fx2, fy2, fz1, r, g, b, a);
+                  line(buffer, matrix, fx2, fy2, fz1, fx2, fy2, fz2, r, g, b, a);
+                  line(buffer, matrix, fx2, fy2, fz2, fx1, fy2, fz2, r, g, b, a);
+                  line(buffer, matrix, fx1, fy2, fz2, fx1, fy2, fz1, r, g, b, a);
+
+                  // the four vertical corner lines
+                  line(buffer, matrix, fx1, fy1, fz1, fx1, fy2, fz1, r, g, b, a);
+                  line(buffer, matrix, fx2, fy1, fz1, fx2, fy2, fz1, r, g, b, a);
+                  line(buffer, matrix, fx2, fy1, fz2, fx2, fy2, fz2, r, g, b, a);
+                  line(buffer, matrix, fx1, fy1, fz2, fx1, fy2, fz2, r, g, b, a);
+              }
+
+              private static void line(BufferBuilder buffer, Matrix4f matrix,
+                                        float x1, float y1, float z1,
+                                        float x2, float y2, float z2,
+                                        float r, float g, float b, float a) {
+                  buffer.vertex(matrix, x1, y1, z1).color(r, g, b, a);
+                  buffer.vertex(matrix, x2, y2, z2).color(r, g, b, a);
               }
           }
           EOF
-      - name: Wrapper
+
+      - name: Set up Gradle 8.10
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10'
+
+      - name: Make the Gradle wrapper
         run: |
-          npm install -g corepack
           gradle wrapper --gradle-version 8.10
           chmod +x gradlew
-      - name: Build
+
+      - name: Build the mod
         run: ./gradlew build
-      - name: Artifact
+
+      - name: Upload the finished mod jar
         uses: actions/upload-artifact@v4
         with:
-          name: Mod-Jar
+          name: chunktracker-mod
           path: build/libs/*.jar
