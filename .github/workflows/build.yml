@@ -39,7 +39,7 @@ jobs:
           yarn_mappings=1.21.11+build.3
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
-          mod_version=2.0.0
+          mod_version=2.1.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -167,6 +167,7 @@ jobs:
           cat > src/main/java/com/example/chunktracker/ChunkOverlayRenderer.java << 'EOF'
           package com.example.chunktracker;
 
+          import java.util.Set;
           import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
           import net.minecraft.client.MinecraftClient;
           import net.minecraft.client.render.RenderLayers;
@@ -181,20 +182,23 @@ jobs:
           import net.minecraft.util.shape.VoxelShapes;
 
           // Draws a red outline for every marked chunk, plus a see-through
-          // red wall around the outside edge of the whole marked area,
-          // like a world border. Nothing here changes real blocks.
+          // red wall around the outside edge of the whole marked area.
+          //
+          // IMPORTANT: the outlines and the walls are drawn in two separate
+          // passes. Asking the game for a second buffer closes the first one,
+          // so they can never be open at the same time.
           public class ChunkOverlayRenderer {
 
               private static final int OUTLINE_RED = 0xFFFF0000;
 
-              // Wall colour. Last number is how solid it looks.
               private static final float WALL_R = 1.0F;
               private static final float WALL_G = 0.0F;
               private static final float WALL_B = 0.0F;
               private static final float WALL_A = 0.22F;
 
               public static void render(WorldRenderContext context) {
-                  if (ChunkTintState.getMarkedChunks().isEmpty()) return;
+                  Set<ChunkPos> marked = ChunkTintState.getMarkedChunks();
+                  if (marked.isEmpty()) return;
 
                   MinecraftClient client = MinecraftClient.getInstance();
                   ClientWorld world = client.world;
@@ -212,49 +216,50 @@ jobs:
                   double bottomY = world.getBottomY();
                   double topY = bottomY + world.getHeight();
 
+                  // ---- PASS 1: all the outlines ----
                   VertexConsumer lines = consumers.getBuffer(RenderLayers.LINES);
-                  VertexConsumer walls = consumers.getBuffer(RenderLayers.debugQuads());
-                  MatrixStack.Entry entry = matrices.peek();
-
-                  double wallBottom = bottomY - cy;
-                  double wallTop = topY - cy;
-
-                  for (ChunkPos pos : ChunkTintState.getMarkedChunks()) {
-                      double minX = pos.getStartX();
-                      double minZ = pos.getStartZ();
-                      double maxX = pos.getEndX() + 1;
-                      double maxZ = pos.getEndZ() + 1;
-
+                  for (ChunkPos pos : marked) {
                       VoxelShape box = VoxelShapes.cuboidUnchecked(
-                              minX, bottomY, minZ,
-                              maxX, topY, maxZ
+                              pos.getStartX(), bottomY, pos.getStartZ(),
+                              pos.getEndX() + 1, topY, pos.getEndZ() + 1
                       );
                       VertexRendering.drawOutline(
                               matrices, lines, box,
                               -cx, -cy, -cz,
                               OUTLINE_RED, 1.0F
                       );
+                  }
+
+                  // ---- PASS 2: the border walls ----
+                  VertexConsumer walls = consumers.getBuffer(RenderLayers.debugQuads());
+                  MatrixStack.Entry entry = matrices.peek();
+                  double wallBottom = bottomY - cy;
+                  double wallTop = topY - cy;
+
+                  for (ChunkPos pos : marked) {
+                      double minX = pos.getStartX() - cx;
+                      double minZ = pos.getStartZ() - cz;
+                      double maxX = pos.getEndX() + 1 - cx;
+                      double maxZ = pos.getEndZ() + 1 - cz;
 
                       // A wall only goes on a side with no marked chunk next
-                      // door, so you get one clean border around the outside
-                      // instead of walls between every chunk.
+                      // door, so you get one clean border around the outside.
                       if (!ChunkTintState.isMarked(pos.x, pos.z - 1)) {
-                          wall(entry, walls, minX - cx, minZ - cz, maxX - cx, minZ - cz, wallBottom, wallTop);
+                          wall(entry, walls, minX, minZ, maxX, minZ, wallBottom, wallTop);
                       }
                       if (!ChunkTintState.isMarked(pos.x, pos.z + 1)) {
-                          wall(entry, walls, minX - cx, maxZ - cz, maxX - cx, maxZ - cz, wallBottom, wallTop);
+                          wall(entry, walls, minX, maxZ, maxX, maxZ, wallBottom, wallTop);
                       }
                       if (!ChunkTintState.isMarked(pos.x - 1, pos.z)) {
-                          wall(entry, walls, minX - cx, minZ - cz, minX - cx, maxZ - cz, wallBottom, wallTop);
+                          wall(entry, walls, minX, minZ, minX, maxZ, wallBottom, wallTop);
                       }
                       if (!ChunkTintState.isMarked(pos.x + 1, pos.z)) {
-                          wall(entry, walls, maxX - cx, minZ - cz, maxX - cx, maxZ - cz, wallBottom, wallTop);
+                          wall(entry, walls, maxX, minZ, maxX, maxZ, wallBottom, wallTop);
                       }
                   }
               }
 
-              // One flat upright panel, drawn twice so it is visible from
-              // both sides.
+              // One flat upright panel, drawn twice so it shows from both sides.
               private static void wall(MatrixStack.Entry entry, VertexConsumer buffer,
                                        double x1, double z1, double x2, double z2,
                                        double yBottom, double yTop) {
