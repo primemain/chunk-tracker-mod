@@ -39,7 +39,7 @@ jobs:
           yarn_mappings=1.21.11+build.3
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
-          mod_version=3.3.0
+          mod_version=3.4.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -121,7 +121,12 @@ jobs:
           import java.util.Set;
           import net.minecraft.util.math.ChunkPos;
 
-          // Remembers which chunks you have walked through.
+          // The list of every chunk you have walked through.
+          //
+          // Nothing is ever removed from this list. The renderer chooses not
+          // to DRAW far away ones, but they stay marked and come back the
+          // moment you walk near them again.
+          //
           // Lives only in memory on your own client. Nothing is saved to the
           // world, nothing is sent to the server, nothing touches real blocks.
           public class ChunkTintState {
@@ -205,12 +210,15 @@ jobs:
           import net.minecraft.util.shape.VoxelShape;
           import net.minecraft.util.shape.VoxelShapes;
 
-          // Red outline for every marked chunk, plus a see-through red wall
-          // around the outside edge of the marked area.
-          //
-          // The outlines and the walls are drawn in two separate passes.
-          // Asking the game for a second buffer closes the first one.
+          // Red outline for every nearby marked chunk, plus a see-through red
+          // wall around the outside edge of the marked area.
           public class ChunkOverlayRenderer {
+
+              // Only chunks this close get drawn in the world. Chunks further
+              // away are STILL MARKED and still show on the minimap - drawing
+              // boxes you cannot see is what was costing the frame rate.
+              // Raise this if you want boxes visible further out.
+              private static final int DRAW_DISTANCE_CHUNKS = 12;
 
               private static final int OUTLINE_RED = 0xFFFF0000;
 
@@ -225,7 +233,7 @@ jobs:
 
                   MinecraftClient client = MinecraftClient.getInstance();
                   ClientWorld world = client.world;
-                  if (world == null) return;
+                  if (world == null || client.player == null) return;
 
                   MatrixStack matrices = context.matrices();
                   VertexConsumerProvider consumers = context.consumers();
@@ -236,11 +244,16 @@ jobs:
                   double cy = camera.y;
                   double cz = camera.z;
 
+                  int playerChunkX = client.player.getChunkPos().x;
+                  int playerChunkZ = client.player.getChunkPos().z;
+
                   double bottomY = world.getBottomY();
                   double topY = bottomY + world.getHeight();
 
                   VertexConsumer lines = consumers.getBuffer(RenderLayers.LINES);
                   for (ChunkPos pos : marked) {
+                      if (tooFar(pos, playerChunkX, playerChunkZ)) continue;
+
                       VoxelShape box = VoxelShapes.cuboidUnchecked(
                               pos.getStartX(), bottomY, pos.getStartZ(),
                               pos.getEndX() + 1, topY, pos.getEndZ() + 1
@@ -258,6 +271,8 @@ jobs:
                   double wallTop = topY - cy;
 
                   for (ChunkPos pos : marked) {
+                      if (tooFar(pos, playerChunkX, playerChunkZ)) continue;
+
                       double minX = pos.getStartX() - cx;
                       double minZ = pos.getStartZ() - cz;
                       double maxX = pos.getEndX() + 1 - cx;
@@ -276,6 +291,11 @@ jobs:
                           wall(entry, walls, maxX, minZ, maxX, maxZ, wallBottom, wallTop);
                       }
                   }
+              }
+
+              private static boolean tooFar(ChunkPos pos, int playerChunkX, int playerChunkZ) {
+                  return Math.abs(pos.x - playerChunkX) > DRAW_DISTANCE_CHUNKS
+                      || Math.abs(pos.z - playerChunkZ) > DRAW_DISTANCE_CHUNKS;
               }
 
               private static void wall(MatrixStack.Entry entry, VertexConsumer buffer,
@@ -340,8 +360,9 @@ jobs:
           import net.minecraft.util.math.BlockPos;
           import net.minecraft.world.Heightmap;
 
-          // A terrain minimap in the top left corner. One map pixel is one
-          // block, with thin black lines marking chunk edges.
+          // A terrain minimap in the top left corner, with thin lines marking
+          // chunk edges. Reads the list of marked chunks, so chunks far away
+          // still show red here even when their world box is not drawn.
           //
           // The picture is worked out a few times a second and stored, then
           // painted each frame. Reading the world every frame would eat FPS.
@@ -349,23 +370,21 @@ jobs:
 
               // ---- SETTINGS YOU CAN CHANGE ----
 
-              // How wide the map is, in REAL screen pixels.
-              // Because one pixel is one block, a bigger map also means you
-              // can see further. This is the setting to change for zoom.
+              // How wide the map is on screen, in REAL screen pixels.
               private static final int MAP_SIZE_REAL = 560;
 
               // How far from the corner, in real pixels.
               private static final int MARGIN_REAL = 16;
 
-              // Blocks covered by one map pixel. 1 is the sharpest possible.
-              // Only raise this if you want to see very far at low detail.
-              private static final int BLOCKS_PER_DOT = 1;
+              // Blocks covered by one map dot. This is the zoom.
+              // Higher = see further out. Lower = more detail, less area.
+              private static final int BLOCKS_PER_DOT = 3;
 
-              // Size of one map pixel on screen, in GUI pixels. 1 is sharpest.
-              private static final int DOT = 1;
+              // Size of one map dot on screen, in GUI pixels.
+              private static final int DOT = 2;
 
               // How often the picture refreshes, in ticks. 20 is once a second.
-              private static final int REFRESH_TICKS = 10;
+              private static final int REFRESH_TICKS = 15;
 
               // Colours, 0xAARRGGBB.
               private static final int UNLOADED     = 0xFF15151A;
@@ -374,9 +393,9 @@ jobs:
               private static final int PLAYER_DOT   = 0xFFFFFFFF;
               private static final int PLAYER_EDGE  = 0xFF000000;
 
-              // The chunk grid. Raise the first two digits for stronger lines,
-              // lower them for fainter ones. 0x00 turns the grid off.
-              private static final int CHUNK_LINE   = 0x66000000;
+              // The chunk grid. First two digits are how dark the lines are.
+              // 0x00 turns the grid off entirely.
+              private static final int CHUNK_LINE   = 0x4D000000;
 
               // How strongly marked chunks are washed red, 0.0 to 1.0.
               private static final double RED_STRENGTH = 0.5;
@@ -444,7 +463,7 @@ jobs:
                       int shiftX = (cacheOriginX - originX) / BLOCKS_PER_DOT;
                       int shiftZ = (cacheOriginZ - originZ) / BLOCKS_PER_DOT;
 
-                      // Rather than one draw per pixel, walk each row and draw
+                      // Rather than one draw per dot, walk each row and draw
                       // stretches of the same colour in one go.
                       for (int dy = 0; dy < dots; dy++) {
                           int runStart = 0;
@@ -466,26 +485,25 @@ jobs:
                           }
                       }
 
-                      // Thin lines wherever a chunk boundary falls, so you can
-                      // see how big each chunk is. Chunks are 16 blocks, and a
-                      // boundary is any world position that divides by 16.
+                      // Thin lines wherever a chunk boundary falls. Chunks are
+                      // 16 blocks, so a boundary is any spot divisible by 16.
                       for (int dx = 0; dx < dots; dx++) {
                           int worldX = originX + dx * BLOCKS_PER_DOT;
-                          if (Math.floorMod(worldX, 16) == 0) {
+                          if (Math.floorMod(worldX, 16) < BLOCKS_PER_DOT) {
                               int x = left + dx * DOT;
                               drawContext.fill(x, top, x + 1, bottom, CHUNK_LINE);
                           }
                       }
                       for (int dy = 0; dy < dots; dy++) {
                           int worldZ = originZ + dy * BLOCKS_PER_DOT;
-                          if (Math.floorMod(worldZ, 16) == 0) {
+                          if (Math.floorMod(worldZ, 16) < BLOCKS_PER_DOT) {
                               int y = top + dy * DOT;
                               drawContext.fill(left, y, right, y + 1, CHUNK_LINE);
                           }
                       }
 
-                      int midX = left + half * DOT;
-                      int midY = top + half * DOT;
+                      int midX = left + half * DOT + DOT / 2;
+                      int midY = top + half * DOT + DOT / 2;
                       drawContext.fill(midX - 2, midY - 2, midX + 3, midY + 3, PLAYER_EDGE);
                       drawContext.fill(midX - 1, midY - 1, midX + 2, midY + 2, PLAYER_DOT);
                   });
@@ -498,7 +516,7 @@ jobs:
                   return cache[sy * dots + sx];
               }
 
-              // Walks the ground around you and works out a colour per pixel.
+              // Walks the ground around you and works out a colour per dot.
               private static void rebuild(ClientWorld world, int dots, int originX, int originZ) {
                   int[] colours = new int[dots * dots];
                   BlockPos.Mutable pos = new BlockPos.Mutable();
@@ -527,6 +545,8 @@ jobs:
                                        & 0x00FFFFFF);
                           }
 
+                          // This reads the marked list directly, so a chunk
+                          // stays red here no matter how far away you walk.
                           if (ChunkTintState.isMarked(worldX >> 4, worldZ >> 4)) {
                               rgb = washRed(rgb);
                           }
@@ -541,9 +561,8 @@ jobs:
                   cacheOriginZ = originZ;
               }
 
-              // Picks how light or dark this pixel should be. Deep water goes
-              // darker the deeper it gets, and land shades by how steeply the
-              // ground rises or falls going north, which makes hills readable.
+              // Deep water goes darker the deeper it gets, and land shades by
+              // how steeply the ground rises or falls going north.
               private static MapColor.Brightness shadeFor(ClientWorld world,
                                                           int worldX, int worldZ, int surfaceY) {
                   int floorY = world.getTopY(Heightmap.Type.OCEAN_FLOOR, worldX, worldZ);
