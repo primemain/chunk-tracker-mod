@@ -21,7 +21,7 @@ jobs:
       - name: Create all the mod files
         run: |
           mkdir -p src/main/java/com/example/chunktracker
-          mkdir -p src/main/resources
+          mkdir -p src/main/resources/assets/chunktracker/lang
 
           cat > settings.gradle << 'EOF'
           pluginManagement {
@@ -39,7 +39,7 @@ jobs:
           yarn_mappings=1.21.11+build.3
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
-          mod_version=2.1.0
+          mod_version=3.0.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -91,7 +91,7 @@ jobs:
             "id": "chunktracker",
             "version": "${version}",
             "name": "Chunk Tracker",
-            "description": "Automatically marks the chunks you have walked through with a red border wall and a red screen tint.",
+            "description": "Automatically marks the chunks you have walked through, with a red border wall, a screen tint, and its own minimap.",
             "environment": "client",
             "license": "CC0-1.0",
             "entrypoints": {
@@ -105,6 +105,12 @@ jobs:
               "java": ">=21",
               "fabric-api": "*"
             }
+          }
+          EOF
+
+          cat > src/main/resources/assets/chunktracker/lang/en_us.json << 'EOF'
+          {
+            "key.chunktracker.minimap": "Toggle Chunk Minimap"
           }
           EOF
 
@@ -144,22 +150,39 @@ jobs:
 
           import net.fabricmc.api.ClientModInitializer;
           import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
           import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.util.InputUtil;
+          import org.lwjgl.glfw.GLFW;
 
-          // No key binds. Marking happens by itself as you walk, starting
-          // the moment you join a world.
+          // Marking happens by itself as you walk. The only key is O, which
+          // shows or hides the minimap. Nothing can wipe your marks.
           public class ChunkTracker implements ClientModInitializer {
+
+              private static KeyBinding minimapKey;
 
               @Override
               public void onInitializeClient() {
+                  minimapKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                          "key.chunktracker.minimap",
+                          InputUtil.Type.KEYSYM,
+                          GLFW.GLFW_KEY_O,
+                          KeyBinding.Category.MISC
+                  ));
+
                   ClientTickEvents.END_CLIENT_TICK.register(client -> {
                       if (client.player != null) {
                           ChunkTintState.markChunksAroundPlayer(client.player.getChunkPos());
+                      }
+                      while (minimapKey.wasPressed()) {
+                          MinimapRenderer.toggle();
                       }
                   });
 
                   WorldRenderEvents.AFTER_ENTITIES.register(ChunkOverlayRenderer::render);
                   ScreenTintRenderer.register();
+                  MinimapRenderer.register();
               }
           }
           EOF
@@ -181,12 +204,12 @@ jobs:
           import net.minecraft.util.shape.VoxelShape;
           import net.minecraft.util.shape.VoxelShapes;
 
-          // Draws a red outline for every marked chunk, plus a see-through
-          // red wall around the outside edge of the whole marked area.
+          // Red outline for every marked chunk, plus a see-through red wall
+          // around the outside edge of the marked area.
           //
-          // IMPORTANT: the outlines and the walls are drawn in two separate
-          // passes. Asking the game for a second buffer closes the first one,
-          // so they can never be open at the same time.
+          // The outlines and the walls are drawn in two separate passes.
+          // Asking the game for a second buffer closes the first one, so they
+          // can never be open at the same time.
           public class ChunkOverlayRenderer {
 
               private static final int OUTLINE_RED = 0xFFFF0000;
@@ -242,8 +265,6 @@ jobs:
                       double maxX = pos.getEndX() + 1 - cx;
                       double maxZ = pos.getEndZ() + 1 - cz;
 
-                      // A wall only goes on a side with no marked chunk next
-                      // door, so you get one clean border around the outside.
                       if (!ChunkTintState.isMarked(pos.x, pos.z - 1)) {
                           wall(entry, walls, minX, minZ, maxX, minZ, wallBottom, wallTop);
                       }
@@ -259,7 +280,6 @@ jobs:
                   }
               }
 
-              // One flat upright panel, drawn twice so it shows from both sides.
               private static void wall(MatrixStack.Entry entry, VertexConsumer buffer,
                                        double x1, double z1, double x2, double z2,
                                        double yBottom, double yTop) {
@@ -288,12 +308,11 @@ jobs:
           import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
           import net.minecraft.client.MinecraftClient;
 
-          // Puts a light red wash over the screen while you are standing
-          // inside an area you have already marked.
+          // Light red wash over the screen while you stand inside an area
+          // you have already marked.
           public class ScreenTintRenderer {
 
               // 0xAARRGGBB. First two digits are the strength.
-              // 0x22 is light. Toward 0x55 is stronger, toward 0x11 is fainter.
               private static final int TINT = 0x22FF0000;
 
               public static void register() {
@@ -308,6 +327,110 @@ jobs:
                       int width = client.getWindow().getScaledWidth();
                       int height = client.getWindow().getScaledHeight();
                       drawContext.fill(0, 0, width, height, TINT);
+                  });
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/MinimapRenderer.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+          import net.minecraft.client.MinecraftClient;
+
+          // A small top-down map in the top left corner showing which chunks
+          // around you are marked. Press O to show or hide it.
+          public class MinimapRenderer {
+
+              // ---- SETTINGS YOU CAN CHANGE ----
+
+              // How far from the corner of the screen, in pixels.
+              private static final int MARGIN = 10;
+
+              // Size of one chunk square, in pixels. This is your zoom.
+              // Bigger number = more zoomed in, fewer chunks on screen.
+              private static final int CELL = 10;
+
+              // How many chunks out from you in each direction.
+              // 12 means 25 chunks across, which at CELL 10 is 250 pixels.
+              private static final int RADIUS = 12;
+
+              // How thick the border is.
+              private static final int BORDER = 2;
+
+              // Colours, all 0xAARRGGBB.
+              private static final int BACKGROUND   = 0xFF0E0E12;
+              private static final int UNMARKED     = 0xFF1C1C24;
+              private static final int MARKED       = 0xFFC62828;
+              private static final int GRID_LINE    = 0xFF26262F;
+              private static final int BORDER_LIGHT = 0xFF9A9AA8;
+              private static final int BORDER_DARK  = 0xFF000000;
+              private static final int PLAYER_DOT   = 0xFFFFFFFF;
+              private static final int PLAYER_EDGE  = 0xFF000000;
+
+              // ---- END OF SETTINGS ----
+
+              private static boolean visible = true;
+
+              public static void toggle() {
+                  visible = !visible;
+              }
+
+              public static void register() {
+                  HudRenderCallback.EVENT.register((drawContext, tickCounter) -> {
+                      if (!visible) return;
+
+                      MinecraftClient client = MinecraftClient.getInstance();
+                      if (client.player == null) return;
+                      if (client.options.hudHidden) return;
+
+                      int cells = RADIUS * 2 + 1;
+                      int mapSize = cells * CELL;
+
+                      int left = MARGIN;
+                      int top = MARGIN;
+                      int right = left + mapSize;
+                      int bottom = top + mapSize;
+
+                      // Dark outer edge, then the light border, then the
+                      // background the chunks sit on.
+                      drawContext.fill(left - BORDER - 1, top - BORDER - 1,
+                                       right + BORDER + 1, bottom + BORDER + 1, BORDER_DARK);
+                      drawContext.fill(left - BORDER, top - BORDER,
+                                       right + BORDER, bottom + BORDER, BORDER_LIGHT);
+                      drawContext.fill(left, top, right, bottom, BACKGROUND);
+
+                      int playerChunkX = client.player.getChunkPos().x;
+                      int playerChunkZ = client.player.getChunkPos().z;
+
+                      // North is up. Negative Z is north, and screen Y grows
+                      // downward, so dz maps straight onto the rows.
+                      for (int dz = -RADIUS; dz <= RADIUS; dz++) {
+                          for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+                              int cellLeft = left + (dx + RADIUS) * CELL;
+                              int cellTop = top + (dz + RADIUS) * CELL;
+
+                              boolean marked = ChunkTintState.isMarked(
+                                      playerChunkX + dx, playerChunkZ + dz);
+
+                              // One pixel short on each side leaves the grid
+                              // lines showing through from the background.
+                              drawContext.fill(cellLeft, cellTop,
+                                               cellLeft + CELL - 1, cellTop + CELL - 1,
+                                               marked ? MARKED : UNMARKED);
+                          }
+                      }
+
+                      // Faint cross through the middle so you can read
+                      // directions at a glance.
+                      int midX = left + RADIUS * CELL;
+                      int midY = top + RADIUS * CELL;
+                      drawContext.fill(left, midY - 1, right, midY, GRID_LINE);
+                      drawContext.fill(midX - 1, top, midX, bottom, GRID_LINE);
+
+                      // You, in the middle.
+                      drawContext.fill(midX - 3, midY - 3, midX + 4, midY + 4, PLAYER_EDGE);
+                      drawContext.fill(midX - 2, midY - 2, midX + 3, midY + 3, PLAYER_DOT);
                   });
               }
           }
