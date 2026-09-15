@@ -39,7 +39,7 @@ jobs:
           yarn_mappings=1.21.11+build.3
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
-          mod_version=3.1.0
+          mod_version=3.2.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -340,33 +340,31 @@ jobs:
           import net.minecraft.util.math.BlockPos;
           import net.minecraft.world.Heightmap;
 
-          // A terrain minimap in the top left corner. Shows the ground around
-          // you, with a red wash over chunks you have already marked.
+          // A terrain minimap in the top left corner. One map pixel is one
+          // block, so it is as sharp as the screen allows.
           //
           // The picture is worked out a few times a second and stored, then
-          // just painted each frame. Reading the world every frame would eat
-          // your FPS.
+          // painted each frame. Reading the world every frame would eat FPS.
           public class MinimapRenderer {
 
               // ---- SETTINGS YOU CAN CHANGE ----
 
-              // How wide the map is, in REAL screen pixels. This is the same
-              // number Xaero's uses, so 250 matches its default size.
-              private static final int MAP_SIZE_REAL = 250;
+              // How wide the map is, in REAL screen pixels.
+              // Xaero's default is 250. Raise this to make the map bigger.
+              private static final int MAP_SIZE_REAL = 420;
 
               // How far from the corner, in real pixels.
-              private static final int MARGIN_REAL = 12;
+              private static final int MARGIN_REAL = 16;
 
-              // How many blocks each dot on the map covers. This is the zoom.
-              // Smaller number = more zoomed in.
-              private static final int BLOCKS_PER_DOT = 3;
+              // Blocks covered by one map pixel. 1 is the sharpest possible.
+              // Raise to 2 or 3 to see further out, at lower detail.
+              private static final int BLOCKS_PER_DOT = 1;
 
-              // How big one dot is on screen, in GUI pixels. 2 keeps the
-              // drawing cheap. 1 is sharper but four times the work.
-              private static final int DOT = 2;
+              // Size of one map pixel on screen, in GUI pixels.
+              // 1 is sharpest. Only raise this if you want a chunkier look.
+              private static final int DOT = 1;
 
-              // How often the picture is refreshed, in ticks. 20 is once
-              // a second. Lower is smoother but costs more.
+              // How often the picture refreshes, in ticks. 20 is once a second.
               private static final int REFRESH_TICKS = 10;
 
               // Colours, 0xAARRGGBB.
@@ -377,7 +375,7 @@ jobs:
               private static final int PLAYER_EDGE  = 0xFF000000;
 
               // How strongly marked chunks are washed red, 0.0 to 1.0.
-              private static final double RED_STRENGTH = 0.55;
+              private static final double RED_STRENGTH = 0.5;
 
               // ---- END OF SETTINGS ----
 
@@ -409,14 +407,13 @@ jobs:
                       if (client.player == null || client.world == null) return;
                       if (client.options.hudHidden) return;
 
-                      // Xaero's size is in real pixels, but everything we draw
-                      // is in GUI pixels, which are bigger. Divide it down so
-                      // the map ends up the size you actually asked for.
+                      // The size above is in real pixels, but drawing happens
+                      // in GUI pixels, which are bigger. Divide it down.
                       int scale = Math.max(1, (int) client.getWindow().getScaleFactor());
-                      int mapSizeGui = Math.max(32, MAP_SIZE_REAL / scale);
+                      int mapSizeGui = Math.max(48, MAP_SIZE_REAL / scale);
                       int margin = Math.max(2, MARGIN_REAL / scale);
 
-                      int dots = Math.max(9, mapSizeGui / DOT);
+                      int dots = Math.max(17, mapSizeGui / DOT);
                       if (dots % 2 == 0) dots++;
                       int drawnSize = dots * DOT;
 
@@ -438,34 +435,49 @@ jobs:
                       drawContext.fill(left - 2, top - 2, right + 2, bottom + 2, BORDER_DARK);
                       drawContext.fill(left - 1, top - 1, right + 1, bottom + 1, BORDER_LIGHT);
 
-                      // The stored picture may be from a moment ago, so shift
-                      // it by however far you have walked since. That keeps it
-                      // lined up instead of jumping every refresh.
+                      // The stored picture may be a moment old, so slide it by
+                      // however far you have walked since it was made.
                       int shiftX = (cacheOriginX - originX) / BLOCKS_PER_DOT;
                       int shiftZ = (cacheOriginZ - originZ) / BLOCKS_PER_DOT;
 
+                      // Rather than one draw per pixel, walk each row and draw
+                      // stretches of the same colour in one go. Terrain has big
+                      // flat patches, so this cuts the work enormously.
                       for (int dy = 0; dy < dots; dy++) {
-                          for (int dx = 0; dx < dots; dx++) {
-                              int sx = dx - shiftX;
-                              int sy = dy - shiftZ;
-                              int colour = UNLOADED;
-                              if (sx >= 0 && sx < dots && sy >= 0 && sy < dots) {
-                                  colour = cache[sy * dots + sx];
+                          int runStart = 0;
+                          int runColour = colourAt(0, dy, dots, shiftX, shiftZ);
+
+                          for (int dx = 1; dx <= dots; dx++) {
+                              int here = (dx < dots)
+                                      ? colourAt(dx, dy, dots, shiftX, shiftZ)
+                                      : ~runColour;
+
+                              if (here != runColour) {
+                                  drawContext.fill(
+                                          left + runStart * DOT, top + dy * DOT,
+                                          left + dx * DOT, top + dy * DOT + DOT,
+                                          runColour);
+                                  runStart = dx;
+                                  runColour = here;
                               }
-                              int x = left + dx * DOT;
-                              int y = top + dy * DOT;
-                              drawContext.fill(x, y, x + DOT, y + DOT, colour);
                           }
                       }
 
-                      int midX = left + half * DOT + DOT / 2;
-                      int midY = top + half * DOT + DOT / 2;
+                      int midX = left + half * DOT;
+                      int midY = top + half * DOT;
                       drawContext.fill(midX - 2, midY - 2, midX + 3, midY + 3, PLAYER_EDGE);
                       drawContext.fill(midX - 1, midY - 1, midX + 2, midY + 2, PLAYER_DOT);
                   });
               }
 
-              // Walks the ground around you and works out a colour per dot.
+              private static int colourAt(int dx, int dy, int dots, int shiftX, int shiftZ) {
+                  int sx = dx - shiftX;
+                  int sy = dy - shiftZ;
+                  if (sx < 0 || sx >= dots || sy < 0 || sy >= dots) return UNLOADED;
+                  return cache[sy * dots + sx];
+              }
+
+              // Walks the ground around you and works out a colour per pixel.
               private static void rebuild(ClientWorld world, int dots, int originX, int originZ) {
                   int[] colours = new int[dots * dots];
                   BlockPos.Mutable pos = new BlockPos.Mutable();
@@ -489,7 +501,7 @@ jobs:
                           if (mapColour == null) {
                               rgb = UNLOADED;
                           } else {
-                              // Shade by how the ground slopes, so hills show.
+                              // Shade by slope so hills and cliffs show up.
                               int northY = world.getTopY(Heightmap.Type.WORLD_SURFACE,
                                       worldX, worldZ - BLOCKS_PER_DOT);
                               MapColor.Brightness shade;
@@ -517,7 +529,7 @@ jobs:
                   cacheOriginZ = originZ;
               }
 
-              // Mixes red into a colour without hiding the ground underneath.
+              // Mixes red in without hiding the ground underneath.
               private static int washRed(int argb) {
                   int r = (argb >> 16) & 0xFF;
                   int g = (argb >> 8) & 0xFF;
