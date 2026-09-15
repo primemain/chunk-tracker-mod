@@ -39,7 +39,7 @@ jobs:
           yarn_mappings=1.21.11+build.3
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
-          mod_version=3.2.0
+          mod_version=3.3.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -341,7 +341,7 @@ jobs:
           import net.minecraft.world.Heightmap;
 
           // A terrain minimap in the top left corner. One map pixel is one
-          // block, so it is as sharp as the screen allows.
+          // block, with thin black lines marking chunk edges.
           //
           // The picture is worked out a few times a second and stored, then
           // painted each frame. Reading the world every frame would eat FPS.
@@ -350,18 +350,18 @@ jobs:
               // ---- SETTINGS YOU CAN CHANGE ----
 
               // How wide the map is, in REAL screen pixels.
-              // Xaero's default is 250. Raise this to make the map bigger.
-              private static final int MAP_SIZE_REAL = 420;
+              // Because one pixel is one block, a bigger map also means you
+              // can see further. This is the setting to change for zoom.
+              private static final int MAP_SIZE_REAL = 560;
 
               // How far from the corner, in real pixels.
               private static final int MARGIN_REAL = 16;
 
               // Blocks covered by one map pixel. 1 is the sharpest possible.
-              // Raise to 2 or 3 to see further out, at lower detail.
+              // Only raise this if you want to see very far at low detail.
               private static final int BLOCKS_PER_DOT = 1;
 
-              // Size of one map pixel on screen, in GUI pixels.
-              // 1 is sharpest. Only raise this if you want a chunkier look.
+              // Size of one map pixel on screen, in GUI pixels. 1 is sharpest.
               private static final int DOT = 1;
 
               // How often the picture refreshes, in ticks. 20 is once a second.
@@ -373,6 +373,10 @@ jobs:
               private static final int BORDER_DARK  = 0xFF000000;
               private static final int PLAYER_DOT   = 0xFFFFFFFF;
               private static final int PLAYER_EDGE  = 0xFF000000;
+
+              // The chunk grid. Raise the first two digits for stronger lines,
+              // lower them for fainter ones. 0x00 turns the grid off.
+              private static final int CHUNK_LINE   = 0x66000000;
 
               // How strongly marked chunks are washed red, 0.0 to 1.0.
               private static final double RED_STRENGTH = 0.5;
@@ -441,8 +445,7 @@ jobs:
                       int shiftZ = (cacheOriginZ - originZ) / BLOCKS_PER_DOT;
 
                       // Rather than one draw per pixel, walk each row and draw
-                      // stretches of the same colour in one go. Terrain has big
-                      // flat patches, so this cuts the work enormously.
+                      // stretches of the same colour in one go.
                       for (int dy = 0; dy < dots; dy++) {
                           int runStart = 0;
                           int runColour = colourAt(0, dy, dots, shiftX, shiftZ);
@@ -460,6 +463,24 @@ jobs:
                                   runStart = dx;
                                   runColour = here;
                               }
+                          }
+                      }
+
+                      // Thin lines wherever a chunk boundary falls, so you can
+                      // see how big each chunk is. Chunks are 16 blocks, and a
+                      // boundary is any world position that divides by 16.
+                      for (int dx = 0; dx < dots; dx++) {
+                          int worldX = originX + dx * BLOCKS_PER_DOT;
+                          if (Math.floorMod(worldX, 16) == 0) {
+                              int x = left + dx * DOT;
+                              drawContext.fill(x, top, x + 1, bottom, CHUNK_LINE);
+                          }
+                      }
+                      for (int dy = 0; dy < dots; dy++) {
+                          int worldZ = originZ + dy * BLOCKS_PER_DOT;
+                          if (Math.floorMod(worldZ, 16) == 0) {
+                              int y = top + dy * DOT;
+                              drawContext.fill(left, y, right, y + 1, CHUNK_LINE);
                           }
                       }
 
@@ -501,18 +522,9 @@ jobs:
                           if (mapColour == null) {
                               rgb = UNLOADED;
                           } else {
-                              // Shade by slope so hills and cliffs show up.
-                              int northY = world.getTopY(Heightmap.Type.WORLD_SURFACE,
-                                      worldX, worldZ - BLOCKS_PER_DOT);
-                              MapColor.Brightness shade;
-                              if (surfaceY > northY) {
-                                  shade = MapColor.Brightness.HIGH;
-                              } else if (surfaceY < northY) {
-                                  shade = MapColor.Brightness.LOW;
-                              } else {
-                                  shade = MapColor.Brightness.NORMAL;
-                              }
-                              rgb = 0xFF000000 | (mapColour.getRenderColor(shade) & 0x00FFFFFF);
+                              rgb = 0xFF000000
+                                    | (mapColour.getRenderColor(shadeFor(world, worldX, worldZ, surfaceY))
+                                       & 0x00FFFFFF);
                           }
 
                           if (ChunkTintState.isMarked(worldX >> 4, worldZ >> 4)) {
@@ -527,6 +539,30 @@ jobs:
                   cacheDots = dots;
                   cacheOriginX = originX;
                   cacheOriginZ = originZ;
+              }
+
+              // Picks how light or dark this pixel should be. Deep water goes
+              // darker the deeper it gets, and land shades by how steeply the
+              // ground rises or falls going north, which makes hills readable.
+              private static MapColor.Brightness shadeFor(ClientWorld world,
+                                                          int worldX, int worldZ, int surfaceY) {
+                  int floorY = world.getTopY(Heightmap.Type.OCEAN_FLOOR, worldX, worldZ);
+                  int depth = surfaceY - floorY;
+
+                  if (depth >= 2) {
+                      if (depth > 9) return MapColor.Brightness.LOWEST;
+                      if (depth > 4) return MapColor.Brightness.LOW;
+                      return MapColor.Brightness.NORMAL;
+                  }
+
+                  int northY = world.getTopY(Heightmap.Type.WORLD_SURFACE,
+                          worldX, worldZ - BLOCKS_PER_DOT);
+                  int rise = surfaceY - northY;
+
+                  if (rise > 0) return MapColor.Brightness.HIGH;
+                  if (rise < -2) return MapColor.Brightness.LOWEST;
+                  if (rise < 0) return MapColor.Brightness.LOW;
+                  return MapColor.Brightness.NORMAL;
               }
 
               // Mixes red in without hiding the ground underneath.
