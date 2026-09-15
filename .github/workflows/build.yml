@@ -39,7 +39,7 @@ jobs:
           yarn_mappings=1.21.11+build.3
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
-          mod_version=3.4.0
+          mod_version=3.5.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -123,8 +123,8 @@ jobs:
 
           // The list of every chunk you have walked through.
           //
-          // Nothing is ever removed from this list. The renderer chooses not
-          // to DRAW far away ones, but they stay marked and come back the
+          // Nothing is ever removed from this list. The world renderer chooses
+          // not to DRAW far away ones, but they stay marked and come back the
           // moment you walk near them again.
           //
           // Lives only in memory on your own client. Nothing is saved to the
@@ -217,7 +217,6 @@ jobs:
               // Only chunks this close get drawn in the world. Chunks further
               // away are STILL MARKED and still show on the minimap - drawing
               // boxes you cannot see is what was costing the frame rate.
-              // Raise this if you want boxes visible further out.
               private static final int DRAW_DISTANCE_CHUNKS = 12;
 
               private static final int OUTLINE_RED = 0xFFFF0000;
@@ -361,11 +360,14 @@ jobs:
           import net.minecraft.world.Heightmap;
 
           // A terrain minimap in the top left corner, with thin lines marking
-          // chunk edges. Reads the list of marked chunks, so chunks far away
-          // still show red here even when their world box is not drawn.
+          // chunk edges.
           //
-          // The picture is worked out a few times a second and stored, then
-          // painted each frame. Reading the world every frame would eat FPS.
+          // The map is locked to a fixed grid in the world. Every dot always
+          // covers the same fixed block square, never a sliding one. The whole
+          // picture - terrain, red marks and chunk lines - is built from that
+          // one grid, so the three can never drift apart from each other.
+          // When you walk far enough to cross a grid square, the picture is
+          // rebuilt all at once and everything moves together.
           public class MinimapRenderer {
 
               // ---- SETTINGS YOU CAN CHANGE ----
@@ -376,15 +378,18 @@ jobs:
               // How far from the corner, in real pixels.
               private static final int MARGIN_REAL = 16;
 
-              // Blocks covered by one map dot. This is the zoom.
-              // Higher = see further out. Lower = more detail, less area.
-              private static final int BLOCKS_PER_DOT = 3;
+              // Blocks covered by one map dot. THIS IS THE ZOOM.
+              // Higher = see much further, less detail.
+              // Keep it to 1, 2, 4, 8 or 16 so it divides evenly into a chunk,
+              // otherwise the chunk lines land in slightly wrong places.
+              private static final int BLOCKS_PER_DOT = 8;
 
               // Size of one map dot on screen, in GUI pixels.
               private static final int DOT = 2;
 
-              // How often the picture refreshes, in ticks. 20 is once a second.
-              private static final int REFRESH_TICKS = 15;
+              // How often the picture refreshes to pick up blocks that changed,
+              // in ticks. Moving always refreshes straight away regardless.
+              private static final int REFRESH_TICKS = 20;
 
               // Colours, 0xAARRGGBB.
               private static final int UNLOADED     = 0xFF15151A;
@@ -395,7 +400,7 @@ jobs:
 
               // The chunk grid. First two digits are how dark the lines are.
               // 0x00 turns the grid off entirely.
-              private static final int CHUNK_LINE   = 0x4D000000;
+              private static final int CHUNK_LINE   = 0x33000000;
 
               // How strongly marked chunks are washed red, 0.0 to 1.0.
               private static final double RED_STRENGTH = 0.5;
@@ -407,8 +412,8 @@ jobs:
 
               private static int[] cache = null;
               private static int cacheDots = 0;
-              private static int cacheOriginX = 0;
-              private static int cacheOriginZ = 0;
+              private static int cacheOriginX = Integer.MIN_VALUE;
+              private static int cacheOriginZ = Integer.MIN_VALUE;
 
               public static void toggle() {
                   visible = !visible;
@@ -439,14 +444,24 @@ jobs:
                       int dots = Math.max(17, mapSizeGui / DOT);
                       if (dots % 2 == 0) dots++;
                       int drawnSize = dots * DOT;
+                      int half = dots / 2;
 
                       int playerX = (int) Math.floor(client.player.getX());
                       int playerZ = (int) Math.floor(client.player.getZ());
-                      int half = dots / 2;
-                      int originX = playerX - half * BLOCKS_PER_DOT;
-                      int originZ = playerZ - half * BLOCKS_PER_DOT;
 
-                      if (cache == null || cacheDots != dots) {
+                      // Snap to the fixed world grid. The dot you are standing
+                      // in is found by dividing down, so the map only shifts
+                      // when you actually cross into the next square.
+                      int playerDotX = Math.floorDiv(playerX, BLOCKS_PER_DOT);
+                      int playerDotZ = Math.floorDiv(playerZ, BLOCKS_PER_DOT);
+                      int originX = (playerDotX - half) * BLOCKS_PER_DOT;
+                      int originZ = (playerDotZ - half) * BLOCKS_PER_DOT;
+
+                      // Rebuild if anything about the view changed. Everything
+                      // below then comes from this one snapshot, so nothing
+                      // can be a frame out of step with anything else.
+                      if (cache == null || cacheDots != dots
+                              || cacheOriginX != originX || cacheOriginZ != originZ) {
                           rebuild(client.world, dots, originX, originZ);
                       }
 
@@ -458,21 +473,14 @@ jobs:
                       drawContext.fill(left - 2, top - 2, right + 2, bottom + 2, BORDER_DARK);
                       drawContext.fill(left - 1, top - 1, right + 1, bottom + 1, BORDER_LIGHT);
 
-                      // The stored picture may be a moment old, so slide it by
-                      // however far you have walked since it was made.
-                      int shiftX = (cacheOriginX - originX) / BLOCKS_PER_DOT;
-                      int shiftZ = (cacheOriginZ - originZ) / BLOCKS_PER_DOT;
-
                       // Rather than one draw per dot, walk each row and draw
                       // stretches of the same colour in one go.
                       for (int dy = 0; dy < dots; dy++) {
                           int runStart = 0;
-                          int runColour = colourAt(0, dy, dots, shiftX, shiftZ);
+                          int runColour = cache[dy * dots];
 
                           for (int dx = 1; dx <= dots; dx++) {
-                              int here = (dx < dots)
-                                      ? colourAt(dx, dy, dots, shiftX, shiftZ)
-                                      : ~runColour;
+                              int here = (dx < dots) ? cache[dy * dots + dx] : ~runColour;
 
                               if (here != runColour) {
                                   drawContext.fill(
@@ -485,35 +493,31 @@ jobs:
                           }
                       }
 
-                      // Thin lines wherever a chunk boundary falls. Chunks are
-                      // 16 blocks, so a boundary is any spot divisible by 16.
+                      // Chunk lines, drawn from the SAME origin as the terrain
+                      // above, so they sit exactly on the chunk edges you can
+                      // see in the colours and move in lockstep with them.
                       for (int dx = 0; dx < dots; dx++) {
-                          int worldX = originX + dx * BLOCKS_PER_DOT;
-                          if (Math.floorMod(worldX, 16) < BLOCKS_PER_DOT) {
+                          if (Math.floorMod(originX + dx * BLOCKS_PER_DOT, 16) == 0) {
                               int x = left + dx * DOT;
                               drawContext.fill(x, top, x + 1, bottom, CHUNK_LINE);
                           }
                       }
                       for (int dy = 0; dy < dots; dy++) {
-                          int worldZ = originZ + dy * BLOCKS_PER_DOT;
-                          if (Math.floorMod(worldZ, 16) < BLOCKS_PER_DOT) {
+                          if (Math.floorMod(originZ + dy * BLOCKS_PER_DOT, 16) == 0) {
                               int y = top + dy * DOT;
                               drawContext.fill(left, y, right, y + 1, CHUNK_LINE);
                           }
                       }
 
+                      // You. Because the map is locked to the grid, your dot
+                      // slides within it rather than the world sliding under
+                      // a pinned dot. That is what stops the whole picture
+                      // from shivering as you walk.
                       int midX = left + half * DOT + DOT / 2;
                       int midY = top + half * DOT + DOT / 2;
                       drawContext.fill(midX - 2, midY - 2, midX + 3, midY + 3, PLAYER_EDGE);
                       drawContext.fill(midX - 1, midY - 1, midX + 2, midY + 2, PLAYER_DOT);
                   });
-              }
-
-              private static int colourAt(int dx, int dy, int dots, int shiftX, int shiftZ) {
-                  int sx = dx - shiftX;
-                  int sy = dy - shiftZ;
-                  if (sx < 0 || sx >= dots || sy < 0 || sy >= dots) return UNLOADED;
-                  return cache[sy * dots + sx];
               }
 
               // Walks the ground around you and works out a colour per dot.
@@ -545,8 +549,8 @@ jobs:
                                        & 0x00FFFFFF);
                           }
 
-                          // This reads the marked list directly, so a chunk
-                          // stays red here no matter how far away you walk.
+                          // Reads the marked list directly, so a chunk stays
+                          // red here no matter how far away you walk.
                           if (ChunkTintState.isMarked(worldX >> 4, worldZ >> 4)) {
                               rgb = washRed(rgb);
                           }
@@ -578,7 +582,7 @@ jobs:
                           worldX, worldZ - BLOCKS_PER_DOT);
                   int rise = surfaceY - northY;
 
-                  if (rise > 0) return MapColor.Brightness.HIGH;
+                  if (rise > 2) return MapColor.Brightness.HIGH;
                   if (rise < -2) return MapColor.Brightness.LOWEST;
                   if (rise < 0) return MapColor.Brightness.LOW;
                   return MapColor.Brightness.NORMAL;
