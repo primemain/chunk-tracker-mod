@@ -23,6 +23,15 @@ jobs:
           mkdir -p src/main/java/com/example/chunktracker
           mkdir -p src/main/resources/assets/chunktracker/lang
 
+          # The mod logo. Mod Menu reads this from inside the jar, so the
+          # picture has to be downloaded and packed in at build time - a web
+          # link on its own would not work.
+          curl -sL -o src/main/resources/assets/chunktracker/icon.png \
+            "https://cdn.phototourl.com/free/2026-09-16-22a7c78f-7eb0-4f98-b1b5-0b874b2acea6.png"
+          echo "icon size in bytes:"
+          wc -c < src/main/resources/assets/chunktracker/icon.png
+          file src/main/resources/assets/chunktracker/icon.png
+
           cat > settings.gradle << 'EOF'
           pluginManagement {
               repositories {
@@ -40,7 +49,7 @@ jobs:
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
           modmenu_version=17.0.1-beta.1
-          mod_version=4.0.0
+          mod_version=4.1.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -60,7 +69,6 @@ jobs:
 
           repositories {
               mavenCentral()
-              // Mod Menu lives on the Terraformers maven, not Fabric's.
               maven { url = uri("https://maven.terraformersmc.com/releases") }
           }
 
@@ -69,9 +77,6 @@ jobs:
               mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
               modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
               modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-
-              // compileOnly means we build against Mod Menu but do not ship
-              // it. The mod still runs fine for anyone without Mod Menu.
               modCompileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
           }
 
@@ -98,7 +103,11 @@ jobs:
             "id": "chunktracker",
             "version": "${version}",
             "name": "Chunk Tracker",
-            "description": "Automatically marks the chunks you have walked through, with a red border wall, a screen tint, and its own terrain minimap.",
+            "description": "Automatically marks the chunks you have walked through with red borders, a screen tint and its own terrain minimap, so you always know where you have already searched.\n\nMade by primemain.",
+            "authors": [
+              "primemain"
+            ],
+            "icon": "assets/chunktracker/icon.png",
             "environment": "client",
             "license": "CC0-1.0",
             "entrypoints": {
@@ -161,8 +170,8 @@ jobs:
           import com.terraformersmc.modmenu.api.ConfigScreenFactory;
           import com.terraformersmc.modmenu.api.ModMenuApi;
 
-          // Tells Mod Menu that this mod has a settings screen, so the little
-          // cog button shows up next to it in the mod list.
+          // Tells Mod Menu that this mod has a settings screen, so the cog
+          // button shows up next to it in the mod list.
           public class ModMenuIntegration implements ModMenuApi {
 
               @Override
@@ -184,9 +193,6 @@ jobs:
 
               private final Screen parent;
 
-              private ButtonWidget worldButton;
-              private ButtonWidget minimapButton;
-
               public ConfigScreen(Screen parent) {
                   super(Text.literal("Chunk Tracker"));
                   this.parent = parent;
@@ -199,12 +205,12 @@ jobs:
                   int left = centreX - buttonWidth / 2;
                   int y = this.height / 4 + 20;
 
-                  worldButton = ButtonWidget.builder(worldLabel(), button -> {
+                  ButtonWidget worldButton = ButtonWidget.builder(worldLabel(), button -> {
                       ModConfig.setWorldMarksOn(!ModConfig.isWorldMarksOn());
                       button.setMessage(worldLabel());
                   }).dimensions(left, y, buttonWidth, 20).build();
 
-                  minimapButton = ButtonWidget.builder(minimapLabel(), button -> {
+                  ButtonWidget minimapButton = ButtonWidget.builder(minimapLabel(), button -> {
                       ModConfig.setMinimapOn(!ModConfig.isMinimapOn());
                       button.setMessage(minimapLabel());
                   }).dimensions(left, y + 28, buttonWidth, 20).build();
@@ -247,8 +253,7 @@ jobs:
           // The list of every chunk you have walked through.
           //
           // Nothing is ever removed from this list, and it keeps filling up
-          // even while the switches are off. Turning a switch back on shows
-          // everything again.
+          // even while the switches are off.
           //
           // Lives only in memory on your own client. Nothing is saved to the
           // world, nothing is sent to the server, nothing touches real blocks.
@@ -489,10 +494,8 @@ jobs:
           // A terrain minimap in the top left corner, with thin lines marking
           // chunk edges.
           //
-          // The map is locked to a fixed grid in the world. Every dot always
-          // covers the same fixed block square, never a sliding one, and the
-          // whole picture is built from that one grid, so terrain, red marks
-          // and chunk lines can never drift apart from each other.
+          // The map is locked to a fixed grid in the world, so terrain, red
+          // marks and chunk lines can never drift apart from each other.
           public class MinimapRenderer {
 
               // ---- SETTINGS YOU CAN CHANGE ----
@@ -610,8 +613,7 @@ jobs:
                           }
                       }
 
-                      // Chunk lines, from the SAME origin as the terrain, so
-                      // they sit exactly on the chunk edges and move with it.
+                      // Chunk lines, from the SAME origin as the terrain.
                       for (int dx = 0; dx < dots; dx++) {
                           if (Math.floorMod(originX + dx * BLOCKS_PER_DOT, 16) == 0) {
                               int x = left + dx * DOT;
