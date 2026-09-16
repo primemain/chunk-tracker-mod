@@ -1,4 +1,4 @@
-name: Find The Real API Names
+name: Build Chunk Tracker Mod
 
 on:
   workflow_dispatch:
@@ -6,57 +6,729 @@ on:
     branches: [ main ]
 
 jobs:
-  lookup:
+  build:
     runs-on: ubuntu-latest
     steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
       - name: Set up Java 21
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Round six lookup
+      - name: Create all the mod files
         run: |
-          set +e
+          mkdir -p src/main/java/com/example/chunktracker
+          mkdir -p src/main/resources/assets/chunktracker/lang
 
-          echo "########## MOD MENU JAR ##########"
-          MM="17.0.1-beta.1"
-          curl -sL -o mm.jar "https://maven.terraformersmc.com/releases/com/terraformersmc/modmenu/$MM/modmenu-$MM.jar"
-          echo "downloaded bytes:"
-          wc -c < mm.jar
-          echo ""
+          cat > settings.gradle << 'EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = uri("https://maven.fabricmc.net/") }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EOF
 
-          echo "########## API CLASSES INSIDE ##########"
-          unzip -l mm.jar 2>/dev/null | grep 'api/' | awk '{print $NF}' | head -20
-          echo ""
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.11
+          yarn_mappings=1.21.11+build.3
+          loader_version=0.18.1
+          fabric_version=0.141.6+1.21.11
+          modmenu_version=17.0.1-beta.1
+          mod_version=4.0.0
+          maven_group=com.example.chunktracker
+          archives_base_name=chunktracker
+          EOF
 
-          mkdir -p mmx && cd mmx && unzip -oq ../mm.jar 2>/dev/null
+          cat > build.gradle << 'EOF'
+          plugins {
+              id 'fabric-loom' version '1.14-SNAPSHOT'
+              id 'maven-publish'
+          }
 
-          echo "########## ModMenuApi ##########"
-          javap -p -classpath . com.terraformersmc.modmenu.api.ModMenuApi 2>&1 | head -20
-          echo ""
+          version = project.mod_version
+          group = project.maven_group
 
-          echo "########## ConfigScreenFactory ##########"
-          javap -p -classpath . com.terraformersmc.modmenu.api.ConfigScreenFactory 2>&1 | head -12
-          echo ""
+          base {
+              archivesName = project.archives_base_name
+          }
 
-          cd ..
-          Y="https://maven.fabricmc.net/docs/yarn-1.21.11%2Bbuild.3/net/minecraft"
+          repositories {
+              mavenCentral()
+              // Mod Menu lives on the Terraformers maven, not Fabric's.
+              maven { url = uri("https://maven.terraformersmc.com/releases") }
+          }
 
-          echo "########## CyclingButtonWidget builders ##########"
-          curl -sL "$Y/client/gui/widget/CyclingButtonWidget.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | grep -iE 'builder|onoff' | sort -u | head -20
-          echo ""
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-          echo "########## ButtonWidget builder ##########"
-          curl -sL "$Y/client/gui/widget/ButtonWidget.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | grep -iE 'builder|build|dimensions|position' | sort -u | head -20
-          echo ""
+              // compileOnly means we build against Mod Menu but do not ship
+              // it. The mod still runs fine for anyone without Mod Menu.
+              modCompileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
+          }
 
-          echo "########## Screen members we need ##########"
-          curl -sL "$Y/client/gui/screen/Screen.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | grep -iE 'init\(|addDrawableChild|close|render\(|title' | sort -u | head -20
-          echo ""
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
 
-          echo "########## Text factory methods ##########"
-          curl -sL "$Y/text/Text.html" | tr '<' '\n' | grep -o 'href="#[^"]*"' | sed 's/href="#//; s/"//' | grep -iE 'literal|translatable' | sort -u | head -10
-          echo ""
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
 
-          echo "########## DONE ##########"
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+          EOF
+
+          cat > src/main/resources/fabric.mod.json << 'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "chunktracker",
+            "version": "${version}",
+            "name": "Chunk Tracker",
+            "description": "Automatically marks the chunks you have walked through, with a red border wall, a screen tint, and its own terrain minimap.",
+            "environment": "client",
+            "license": "CC0-1.0",
+            "entrypoints": {
+              "client": [
+                "com.example.chunktracker.ChunkTracker"
+              ],
+              "modmenu": [
+                "com.example.chunktracker.ModMenuIntegration"
+              ]
+            },
+            "depends": {
+              "fabricloader": ">=0.18.0",
+              "minecraft": "~1.21.11",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+
+          cat > src/main/resources/assets/chunktracker/lang/en_us.json << 'EOF'
+          {
+            "key.chunktracker.minimap": "Toggle Chunk Minimap"
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ModConfig.java << 'EOF'
+          package com.example.chunktracker;
+
+          // The two switches, flipped from the Mod Menu settings screen.
+          //
+          // Turning something off only stops it being DRAWN. Chunks keep
+          // being marked in the background, so switching back on brings
+          // everything you walked through straight back.
+          public class ModConfig {
+
+              private static boolean worldMarksOn = true;
+              private static boolean minimapOn = true;
+
+              public static boolean isWorldMarksOn() {
+                  return worldMarksOn;
+              }
+
+              public static boolean isMinimapOn() {
+                  return minimapOn;
+              }
+
+              public static void setWorldMarksOn(boolean value) {
+                  worldMarksOn = value;
+              }
+
+              public static void setMinimapOn(boolean value) {
+                  minimapOn = value;
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ModMenuIntegration.java << 'EOF'
+          package com.example.chunktracker;
+
+          import com.terraformersmc.modmenu.api.ConfigScreenFactory;
+          import com.terraformersmc.modmenu.api.ModMenuApi;
+
+          // Tells Mod Menu that this mod has a settings screen, so the little
+          // cog button shows up next to it in the mod list.
+          public class ModMenuIntegration implements ModMenuApi {
+
+              @Override
+              public ConfigScreenFactory<?> getModConfigScreenFactory() {
+                  return ConfigScreen::new;
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ConfigScreen.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.text.Text;
+
+          // The settings screen. Two switches and a done button.
+          public class ConfigScreen extends Screen {
+
+              private final Screen parent;
+
+              private ButtonWidget worldButton;
+              private ButtonWidget minimapButton;
+
+              public ConfigScreen(Screen parent) {
+                  super(Text.literal("Chunk Tracker"));
+                  this.parent = parent;
+              }
+
+              @Override
+              protected void init() {
+                  int centreX = this.width / 2;
+                  int buttonWidth = 220;
+                  int left = centreX - buttonWidth / 2;
+                  int y = this.height / 4 + 20;
+
+                  worldButton = ButtonWidget.builder(worldLabel(), button -> {
+                      ModConfig.setWorldMarksOn(!ModConfig.isWorldMarksOn());
+                      button.setMessage(worldLabel());
+                  }).dimensions(left, y, buttonWidth, 20).build();
+
+                  minimapButton = ButtonWidget.builder(minimapLabel(), button -> {
+                      ModConfig.setMinimapOn(!ModConfig.isMinimapOn());
+                      button.setMessage(minimapLabel());
+                  }).dimensions(left, y + 28, buttonWidth, 20).build();
+
+                  ButtonWidget doneButton = ButtonWidget.builder(
+                          Text.literal("Done"), button -> this.close()
+                  ).dimensions(left, y + 72, buttonWidth, 20).build();
+
+                  this.addDrawableChild(worldButton);
+                  this.addDrawableChild(minimapButton);
+                  this.addDrawableChild(doneButton);
+              }
+
+              private static Text worldLabel() {
+                  return Text.literal("Red chunk marks in world: "
+                          + (ModConfig.isWorldMarksOn() ? "ON" : "OFF"));
+              }
+
+              private static Text minimapLabel() {
+                  return Text.literal("Minimap: "
+                          + (ModConfig.isMinimapOn() ? "ON" : "OFF"));
+              }
+
+              @Override
+              public void close() {
+                  if (this.client != null) {
+                      this.client.setScreen(this.parent);
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ChunkTintState.java << 'EOF'
+          package com.example.chunktracker;
+
+          import java.util.HashSet;
+          import java.util.Set;
+          import net.minecraft.util.math.ChunkPos;
+
+          // The list of every chunk you have walked through.
+          //
+          // Nothing is ever removed from this list, and it keeps filling up
+          // even while the switches are off. Turning a switch back on shows
+          // everything again.
+          //
+          // Lives only in memory on your own client. Nothing is saved to the
+          // world, nothing is sent to the server, nothing touches real blocks.
+          public class ChunkTintState {
+              private static final Set<ChunkPos> markedChunks = new HashSet<>();
+
+              public static void markChunksAroundPlayer(ChunkPos center) {
+                  for (int dx = -1; dx <= 1; dx++) {
+                      for (int dz = -1; dz <= 1; dz++) {
+                          markedChunks.add(new ChunkPos(center.x + dx, center.z + dz));
+                      }
+                  }
+              }
+
+              public static boolean isMarked(int chunkX, int chunkZ) {
+                  return markedChunks.contains(new ChunkPos(chunkX, chunkZ));
+              }
+
+              public static Set<ChunkPos> getMarkedChunks() {
+                  return markedChunks;
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ChunkTracker.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.util.InputUtil;
+          import org.lwjgl.glfw.GLFW;
+
+          // Marking happens by itself as you walk, always, even with the
+          // switches off. O still hides the minimap quickly if you want.
+          public class ChunkTracker implements ClientModInitializer {
+
+              private static KeyBinding minimapKey;
+
+              @Override
+              public void onInitializeClient() {
+                  minimapKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                          "key.chunktracker.minimap",
+                          InputUtil.Type.KEYSYM,
+                          GLFW.GLFW_KEY_O,
+                          KeyBinding.Category.MISC
+                  ));
+
+                  ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                      if (client.player != null) {
+                          ChunkTintState.markChunksAroundPlayer(client.player.getChunkPos());
+                      }
+                      while (minimapKey.wasPressed()) {
+                          ModConfig.setMinimapOn(!ModConfig.isMinimapOn());
+                      }
+                      MinimapRenderer.tick();
+                  });
+
+                  WorldRenderEvents.AFTER_ENTITIES.register(ChunkOverlayRenderer::render);
+                  ScreenTintRenderer.register();
+                  MinimapRenderer.register();
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ChunkOverlayRenderer.java << 'EOF'
+          package com.example.chunktracker;
+
+          import java.util.Set;
+          import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.render.RenderLayers;
+          import net.minecraft.client.render.VertexConsumer;
+          import net.minecraft.client.render.VertexConsumerProvider;
+          import net.minecraft.client.render.VertexRendering;
+          import net.minecraft.client.util.math.MatrixStack;
+          import net.minecraft.client.world.ClientWorld;
+          import net.minecraft.util.math.ChunkPos;
+          import net.minecraft.util.math.Vec3d;
+          import net.minecraft.util.shape.VoxelShape;
+          import net.minecraft.util.shape.VoxelShapes;
+
+          // Red outline for every nearby marked chunk, plus a see-through red
+          // wall around the outside edge of the marked area.
+          public class ChunkOverlayRenderer {
+
+              // Only chunks this close get drawn. Chunks further away are
+              // STILL MARKED and still show on the minimap - drawing boxes
+              // you cannot see is what was costing the frame rate.
+              private static final int DRAW_DISTANCE_CHUNKS = 12;
+
+              private static final int OUTLINE_RED = 0xFFFF0000;
+
+              private static final float WALL_R = 1.0F;
+              private static final float WALL_G = 0.0F;
+              private static final float WALL_B = 0.0F;
+              private static final float WALL_A = 0.22F;
+
+              public static void render(WorldRenderContext context) {
+                  if (!ModConfig.isWorldMarksOn()) return;
+
+                  Set<ChunkPos> marked = ChunkTintState.getMarkedChunks();
+                  if (marked.isEmpty()) return;
+
+                  MinecraftClient client = MinecraftClient.getInstance();
+                  ClientWorld world = client.world;
+                  if (world == null || client.player == null) return;
+
+                  MatrixStack matrices = context.matrices();
+                  VertexConsumerProvider consumers = context.consumers();
+                  if (matrices == null || consumers == null) return;
+
+                  Vec3d camera = client.gameRenderer.getCamera().getCameraPos();
+                  double cx = camera.x;
+                  double cy = camera.y;
+                  double cz = camera.z;
+
+                  int playerChunkX = client.player.getChunkPos().x;
+                  int playerChunkZ = client.player.getChunkPos().z;
+
+                  double bottomY = world.getBottomY();
+                  double topY = bottomY + world.getHeight();
+
+                  VertexConsumer lines = consumers.getBuffer(RenderLayers.LINES);
+                  for (ChunkPos pos : marked) {
+                      if (tooFar(pos, playerChunkX, playerChunkZ)) continue;
+
+                      VoxelShape box = VoxelShapes.cuboidUnchecked(
+                              pos.getStartX(), bottomY, pos.getStartZ(),
+                              pos.getEndX() + 1, topY, pos.getEndZ() + 1
+                      );
+                      VertexRendering.drawOutline(
+                              matrices, lines, box,
+                              -cx, -cy, -cz,
+                              OUTLINE_RED, 1.0F
+                      );
+                  }
+
+                  VertexConsumer walls = consumers.getBuffer(RenderLayers.debugQuads());
+                  MatrixStack.Entry entry = matrices.peek();
+                  double wallBottom = bottomY - cy;
+                  double wallTop = topY - cy;
+
+                  for (ChunkPos pos : marked) {
+                      if (tooFar(pos, playerChunkX, playerChunkZ)) continue;
+
+                      double minX = pos.getStartX() - cx;
+                      double minZ = pos.getStartZ() - cz;
+                      double maxX = pos.getEndX() + 1 - cx;
+                      double maxZ = pos.getEndZ() + 1 - cz;
+
+                      if (!ChunkTintState.isMarked(pos.x, pos.z - 1)) {
+                          wall(entry, walls, minX, minZ, maxX, minZ, wallBottom, wallTop);
+                      }
+                      if (!ChunkTintState.isMarked(pos.x, pos.z + 1)) {
+                          wall(entry, walls, minX, maxZ, maxX, maxZ, wallBottom, wallTop);
+                      }
+                      if (!ChunkTintState.isMarked(pos.x - 1, pos.z)) {
+                          wall(entry, walls, minX, minZ, minX, maxZ, wallBottom, wallTop);
+                      }
+                      if (!ChunkTintState.isMarked(pos.x + 1, pos.z)) {
+                          wall(entry, walls, maxX, minZ, maxX, maxZ, wallBottom, wallTop);
+                      }
+                  }
+              }
+
+              private static boolean tooFar(ChunkPos pos, int playerChunkX, int playerChunkZ) {
+                  return Math.abs(pos.x - playerChunkX) > DRAW_DISTANCE_CHUNKS
+                      || Math.abs(pos.z - playerChunkZ) > DRAW_DISTANCE_CHUNKS;
+              }
+
+              private static void wall(MatrixStack.Entry entry, VertexConsumer buffer,
+                                       double x1, double z1, double x2, double z2,
+                                       double yBottom, double yTop) {
+                  vertex(entry, buffer, x1, yBottom, z1);
+                  vertex(entry, buffer, x2, yBottom, z2);
+                  vertex(entry, buffer, x2, yTop, z2);
+                  vertex(entry, buffer, x1, yTop, z1);
+
+                  vertex(entry, buffer, x1, yTop, z1);
+                  vertex(entry, buffer, x2, yTop, z2);
+                  vertex(entry, buffer, x2, yBottom, z2);
+                  vertex(entry, buffer, x1, yBottom, z1);
+              }
+
+              private static void vertex(MatrixStack.Entry entry, VertexConsumer buffer,
+                                         double x, double y, double z) {
+                  buffer.vertex(entry, (float) x, (float) y, (float) z)
+                        .color(WALL_R, WALL_G, WALL_B, WALL_A);
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/ScreenTintRenderer.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+          import net.minecraft.client.MinecraftClient;
+
+          // Light red wash over the screen while you stand inside an area
+          // you have already marked.
+          public class ScreenTintRenderer {
+
+              private static final int TINT = 0x22FF0000;
+
+              public static void register() {
+                  HudRenderCallback.EVENT.register((drawContext, tickCounter) -> {
+                      if (!ModConfig.isWorldMarksOn()) return;
+
+                      MinecraftClient client = MinecraftClient.getInstance();
+                      if (client.player == null) return;
+
+                      int chunkX = client.player.getChunkPos().x;
+                      int chunkZ = client.player.getChunkPos().z;
+                      if (!ChunkTintState.isMarked(chunkX, chunkZ)) return;
+
+                      int width = client.getWindow().getScaledWidth();
+                      int height = client.getWindow().getScaledHeight();
+                      drawContext.fill(0, 0, width, height, TINT);
+                  });
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/example/chunktracker/MinimapRenderer.java << 'EOF'
+          package com.example.chunktracker;
+
+          import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+          import net.minecraft.block.BlockState;
+          import net.minecraft.block.MapColor;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.world.ClientWorld;
+          import net.minecraft.util.math.BlockPos;
+          import net.minecraft.world.Heightmap;
+
+          // A terrain minimap in the top left corner, with thin lines marking
+          // chunk edges.
+          //
+          // The map is locked to a fixed grid in the world. Every dot always
+          // covers the same fixed block square, never a sliding one, and the
+          // whole picture is built from that one grid, so terrain, red marks
+          // and chunk lines can never drift apart from each other.
+          public class MinimapRenderer {
+
+              // ---- SETTINGS YOU CAN CHANGE ----
+
+              // How wide the map is on screen, in REAL screen pixels.
+              private static final int MAP_SIZE_REAL = 560;
+
+              // How far from the corner, in real pixels.
+              private static final int MARGIN_REAL = 16;
+
+              // Blocks covered by one map dot. THIS IS THE ZOOM.
+              // Keep it to 1, 2, 4, 8 or 16 so it divides into a chunk evenly.
+              private static final int BLOCKS_PER_DOT = 8;
+
+              // Size of one map dot on screen, in GUI pixels.
+              private static final int DOT = 2;
+
+              // How often the picture refreshes to pick up changed blocks.
+              // Moving always refreshes straight away regardless.
+              private static final int REFRESH_TICKS = 20;
+
+              // Colours, 0xAARRGGBB.
+              private static final int UNLOADED     = 0xFF15151A;
+              private static final int BORDER_LIGHT = 0xFF9A9AA8;
+              private static final int BORDER_DARK  = 0xFF000000;
+              private static final int PLAYER_DOT   = 0xFFFFFFFF;
+              private static final int PLAYER_EDGE  = 0xFF000000;
+
+              // The chunk grid. 0x00 turns the grid off entirely.
+              private static final int CHUNK_LINE   = 0x33000000;
+
+              // How strongly marked chunks are washed red, 0.0 to 1.0.
+              private static final double RED_STRENGTH = 0.5;
+
+              // ---- END OF SETTINGS ----
+
+              private static int tickCounter = 0;
+
+              private static int[] cache = null;
+              private static int cacheDots = 0;
+              private static int cacheOriginX = Integer.MIN_VALUE;
+              private static int cacheOriginZ = Integer.MIN_VALUE;
+              private static boolean cacheMarksShown = true;
+
+              public static void tick() {
+                  tickCounter++;
+                  if (tickCounter >= REFRESH_TICKS) {
+                      tickCounter = 0;
+                      cache = null;
+                  }
+              }
+
+              public static void register() {
+                  HudRenderCallback.EVENT.register((drawContext, delta) -> {
+                      if (!ModConfig.isMinimapOn()) return;
+
+                      MinecraftClient client = MinecraftClient.getInstance();
+                      if (client.player == null || client.world == null) return;
+                      if (client.options.hudHidden) return;
+
+                      // The size above is in real pixels, but drawing happens
+                      // in GUI pixels, which are bigger. Divide it down.
+                      int scale = Math.max(1, (int) client.getWindow().getScaleFactor());
+                      int mapSizeGui = Math.max(48, MAP_SIZE_REAL / scale);
+                      int margin = Math.max(2, MARGIN_REAL / scale);
+
+                      int dots = Math.max(17, mapSizeGui / DOT);
+                      if (dots % 2 == 0) dots++;
+                      int drawnSize = dots * DOT;
+                      int half = dots / 2;
+
+                      int playerX = (int) Math.floor(client.player.getX());
+                      int playerZ = (int) Math.floor(client.player.getZ());
+
+                      // Snap to the fixed world grid, so the map only shifts
+                      // when you cross into the next square.
+                      int playerDotX = Math.floorDiv(playerX, BLOCKS_PER_DOT);
+                      int playerDotZ = Math.floorDiv(playerZ, BLOCKS_PER_DOT);
+                      int originX = (playerDotX - half) * BLOCKS_PER_DOT;
+                      int originZ = (playerDotZ - half) * BLOCKS_PER_DOT;
+
+                      boolean marksShown = ModConfig.isWorldMarksOn();
+
+                      if (cache == null || cacheDots != dots
+                              || cacheOriginX != originX || cacheOriginZ != originZ
+                              || cacheMarksShown != marksShown) {
+                          rebuild(client.world, dots, originX, originZ, marksShown);
+                      }
+
+                      int left = margin;
+                      int top = margin;
+                      int right = left + drawnSize;
+                      int bottom = top + drawnSize;
+
+                      drawContext.fill(left - 2, top - 2, right + 2, bottom + 2, BORDER_DARK);
+                      drawContext.fill(left - 1, top - 1, right + 1, bottom + 1, BORDER_LIGHT);
+
+                      // Draw stretches of the same colour in one go rather
+                      // than one draw per dot.
+                      for (int dy = 0; dy < dots; dy++) {
+                          int runStart = 0;
+                          int runColour = cache[dy * dots];
+
+                          for (int dx = 1; dx <= dots; dx++) {
+                              int here = (dx < dots) ? cache[dy * dots + dx] : ~runColour;
+
+                              if (here != runColour) {
+                                  drawContext.fill(
+                                          left + runStart * DOT, top + dy * DOT,
+                                          left + dx * DOT, top + dy * DOT + DOT,
+                                          runColour);
+                                  runStart = dx;
+                                  runColour = here;
+                              }
+                          }
+                      }
+
+                      // Chunk lines, from the SAME origin as the terrain, so
+                      // they sit exactly on the chunk edges and move with it.
+                      for (int dx = 0; dx < dots; dx++) {
+                          if (Math.floorMod(originX + dx * BLOCKS_PER_DOT, 16) == 0) {
+                              int x = left + dx * DOT;
+                              drawContext.fill(x, top, x + 1, bottom, CHUNK_LINE);
+                          }
+                      }
+                      for (int dy = 0; dy < dots; dy++) {
+                          if (Math.floorMod(originZ + dy * BLOCKS_PER_DOT, 16) == 0) {
+                              int y = top + dy * DOT;
+                              drawContext.fill(left, y, right, y + 1, CHUNK_LINE);
+                          }
+                      }
+
+                      int midX = left + half * DOT + DOT / 2;
+                      int midY = top + half * DOT + DOT / 2;
+                      drawContext.fill(midX - 2, midY - 2, midX + 3, midY + 3, PLAYER_EDGE);
+                      drawContext.fill(midX - 1, midY - 1, midX + 2, midY + 2, PLAYER_DOT);
+                  });
+              }
+
+              // Walks the ground around you and works out a colour per dot.
+              private static void rebuild(ClientWorld world, int dots,
+                                          int originX, int originZ, boolean marksShown) {
+                  int[] colours = new int[dots * dots];
+                  BlockPos.Mutable pos = new BlockPos.Mutable();
+
+                  for (int dy = 0; dy < dots; dy++) {
+                      for (int dx = 0; dx < dots; dx++) {
+                          int worldX = originX + dx * BLOCKS_PER_DOT;
+                          int worldZ = originZ + dy * BLOCKS_PER_DOT;
+
+                          if (!world.isChunkLoaded(worldX >> 4, worldZ >> 4)) {
+                              colours[dy * dots + dx] = UNLOADED;
+                              continue;
+                          }
+
+                          int surfaceY = world.getTopY(Heightmap.Type.WORLD_SURFACE, worldX, worldZ);
+                          pos.set(worldX, surfaceY - 1, worldZ);
+                          BlockState state = world.getBlockState(pos);
+                          MapColor mapColour = state.getMapColor(world, pos);
+
+                          int rgb;
+                          if (mapColour == null) {
+                              rgb = UNLOADED;
+                          } else {
+                              rgb = 0xFF000000
+                                    | (mapColour.getRenderColor(shadeFor(world, worldX, worldZ, surfaceY))
+                                       & 0x00FFFFFF);
+                          }
+
+                          if (marksShown && ChunkTintState.isMarked(worldX >> 4, worldZ >> 4)) {
+                              rgb = washRed(rgb);
+                          }
+
+                          colours[dy * dots + dx] = rgb;
+                      }
+                  }
+
+                  cache = colours;
+                  cacheDots = dots;
+                  cacheOriginX = originX;
+                  cacheOriginZ = originZ;
+                  cacheMarksShown = marksShown;
+              }
+
+              // Deep water darkens with depth, land shades by slope.
+              private static MapColor.Brightness shadeFor(ClientWorld world,
+                                                          int worldX, int worldZ, int surfaceY) {
+                  int floorY = world.getTopY(Heightmap.Type.OCEAN_FLOOR, worldX, worldZ);
+                  int depth = surfaceY - floorY;
+
+                  if (depth >= 2) {
+                      if (depth > 9) return MapColor.Brightness.LOWEST;
+                      if (depth > 4) return MapColor.Brightness.LOW;
+                      return MapColor.Brightness.NORMAL;
+                  }
+
+                  int northY = world.getTopY(Heightmap.Type.WORLD_SURFACE,
+                          worldX, worldZ - BLOCKS_PER_DOT);
+                  int rise = surfaceY - northY;
+
+                  if (rise > 2) return MapColor.Brightness.HIGH;
+                  if (rise < -2) return MapColor.Brightness.LOWEST;
+                  if (rise < 0) return MapColor.Brightness.LOW;
+                  return MapColor.Brightness.NORMAL;
+              }
+
+              // Mixes red in without hiding the ground underneath.
+              private static int washRed(int argb) {
+                  int r = (argb >> 16) & 0xFF;
+                  int g = (argb >> 8) & 0xFF;
+                  int b = argb & 0xFF;
+
+                  r = (int) (r * (1 - RED_STRENGTH) + 255 * RED_STRENGTH);
+                  g = (int) (g * (1 - RED_STRENGTH));
+                  b = (int) (b * (1 - RED_STRENGTH));
+
+                  return 0xFF000000 | (Math.min(255, r) << 16) | (g << 8) | b;
+              }
+          }
+          EOF
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.2.1'
+
+      - name: Make the Gradle wrapper
+        run: |
+          gradle wrapper --gradle-version 9.2.1
+          chmod +x gradlew
+
+      - name: Build the mod
+        run: ./gradlew build --stacktrace
+
+      - name: Upload the finished mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunktracker-mod
+          path: build/libs/*.jar
