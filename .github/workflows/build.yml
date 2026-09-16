@@ -40,7 +40,7 @@ jobs:
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
           modmenu_version=17.0.1-beta.1
-          mod_version=5.0.1
+          mod_version=6.0.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -94,7 +94,7 @@ jobs:
             "id": "chunktracker",
             "version": "${version}",
             "name": "Chunk Tracker",
-            "description": "Automatically marks the chunks you have walked through, with a red border wall, a screen tint, and its own terrain minimap.",
+            "description": "Automatically marks the chunks you have walked through, with a red border wall, a screen tint, and its own terrain and cave minimap.",
             "environment": "client",
             "license": "CC0-1.0",
             "entrypoints": {
@@ -124,14 +124,12 @@ jobs:
           package com.example.chunktracker;
 
           // Everything the Mod Menu settings screen controls.
-          //
-          // The three switches are separate on purpose. Turning the world
-          // marks off leaves the game looking completely normal while the
-          // minimap still shows you exactly where you have been.
-          //
-          // None of these stop chunks being recorded. The list keeps filling
-          // up no matter what.
           public class ModConfig {
+
+              // Map modes.
+              public static final int MODE_SURFACE = 0;
+              public static final int MODE_CAVE = 1;
+              public static final int MODE_AUTO = 2;
 
               // Zoom steps, in blocks per map dot. All divide evenly into a
               // 16 block chunk, which keeps the grid lines honest.
@@ -140,8 +138,7 @@ jobs:
               // Minimap sizes, in real screen pixels.
               private static final int[] SIZE_STEPS = { 280, 420, 560, 700, 840 };
 
-              // Length of the little line showing which way you face, in
-              // screen pixels. 0 turns it off.
+              // Facing line length in screen pixels. 0 turns it off.
               private static final int[] FACING_STEPS = { 0, 5, 8, 12 };
 
               private static boolean worldMarksOn = true;
@@ -151,6 +148,7 @@ jobs:
               private static int blocksPerDot = 8;
               private static int mapSizeReal = 560;
               private static int facingLineLength = 8;
+              private static int mapMode = MODE_AUTO;
 
               public static boolean isWorldMarksOn() {
                   return worldMarksOn;
@@ -174,6 +172,10 @@ jobs:
 
               public static int getFacingLineLength() {
                   return facingLineLength;
+              }
+
+              public static int getMapMode() {
+                  return mapMode;
               }
 
               public static void setWorldMarksOn(boolean value) {
@@ -200,6 +202,10 @@ jobs:
                   facingLineLength = nextIn(FACING_STEPS, facingLineLength);
               }
 
+              public static void cycleMapMode() {
+                  mapMode = (mapMode + 1) % 3;
+              }
+
               private static int nextIn(int[] steps, int current) {
                   for (int i = 0; i < steps.length; i++) {
                       if (steps[i] == current) {
@@ -217,8 +223,7 @@ jobs:
           import com.terraformersmc.modmenu.api.ConfigScreenFactory;
           import com.terraformersmc.modmenu.api.ModMenuApi;
 
-          // Tells Mod Menu this mod has a settings screen, so the cog button
-          // shows up next to it in the mod list.
+          // Tells Mod Menu this mod has a settings screen.
           public class ModMenuIntegration implements ModMenuApi {
 
               @Override
@@ -235,7 +240,7 @@ jobs:
           import net.minecraft.client.gui.widget.ButtonWidget;
           import net.minecraft.text.Text;
 
-          // The settings screen: three switches, three cycling values, done.
+          // The settings screen.
           public class ConfigScreen extends Screen {
 
               private final Screen parent;
@@ -249,7 +254,7 @@ jobs:
               protected void init() {
                   int buttonWidth = 260;
                   int left = this.width / 2 - buttonWidth / 2;
-                  int y = this.height / 6 - 10;
+                  int y = this.height / 6 - 20;
                   int gap = 24;
 
                   this.addDrawableChild(ButtonWidget.builder(worldLabel(), button -> {
@@ -267,24 +272,29 @@ jobs:
                       button.setMessage(minimapLabel());
                   }).dimensions(left, y + gap * 2, buttonWidth, 20).build());
 
+                  this.addDrawableChild(ButtonWidget.builder(modeLabel(), button -> {
+                      ModConfig.cycleMapMode();
+                      button.setMessage(modeLabel());
+                  }).dimensions(left, y + gap * 3 + 10, buttonWidth, 20).build());
+
                   this.addDrawableChild(ButtonWidget.builder(zoomLabel(), button -> {
                       ModConfig.cycleZoom();
                       button.setMessage(zoomLabel());
-                  }).dimensions(left, y + gap * 3 + 10, buttonWidth, 20).build());
+                  }).dimensions(left, y + gap * 4 + 10, buttonWidth, 20).build());
 
                   this.addDrawableChild(ButtonWidget.builder(sizeLabel(), button -> {
                       ModConfig.cycleSize();
                       button.setMessage(sizeLabel());
-                  }).dimensions(left, y + gap * 4 + 10, buttonWidth, 20).build());
+                  }).dimensions(left, y + gap * 5 + 10, buttonWidth, 20).build());
 
                   this.addDrawableChild(ButtonWidget.builder(facingLabel(), button -> {
                       ModConfig.cycleFacingLine();
                       button.setMessage(facingLabel());
-                  }).dimensions(left, y + gap * 5 + 10, buttonWidth, 20).build());
+                  }).dimensions(left, y + gap * 6 + 10, buttonWidth, 20).build());
 
                   this.addDrawableChild(ButtonWidget.builder(
                           Text.literal("Done"), button -> this.close()
-                  ).dimensions(left, y + gap * 6 + 30, buttonWidth, 20).build());
+                  ).dimensions(left, y + gap * 7 + 26, buttonWidth, 20).build());
               }
 
               private static Text worldLabel() {
@@ -300,6 +310,16 @@ jobs:
               private static Text minimapLabel() {
                   return Text.literal("Show minimap: "
                           + (ModConfig.isMinimapOn() ? "ON" : "OFF"));
+              }
+
+              private static Text modeLabel() {
+                  String name;
+                  switch (ModConfig.getMapMode()) {
+                      case ModConfig.MODE_SURFACE -> name = "SURFACE";
+                      case ModConfig.MODE_CAVE -> name = "CAVE";
+                      default -> name = "AUTO (switches underground)";
+                  }
+                  return Text.literal("Map mode: " + name);
               }
 
               private static Text zoomLabel() {
@@ -344,10 +364,8 @@ jobs:
           import java.util.Set;
           import net.minecraft.util.math.ChunkPos;
 
-          // The list of every chunk you have walked through.
-          //
-          // Nothing is ever removed, and it keeps filling up even while every
-          // switch is off.
+          // The list of every chunk you have walked through. Nothing is ever
+          // removed, and it keeps filling up even while every switch is off.
           //
           // Lives only in memory on your own client. Nothing is saved to the
           // world, nothing is sent to the server, nothing touches real blocks.
@@ -383,8 +401,8 @@ jobs:
           import net.minecraft.client.util.InputUtil;
           import org.lwjgl.glfw.GLFW;
 
-          // Marking happens by itself as you walk, always, whatever the
-          // switches say. O is a quick shortcut for the minimap switch.
+          // Marking happens by itself as you walk, always. O is a quick
+          // shortcut for the minimap switch.
           public class ChunkTracker implements ClientModInitializer {
 
               private static KeyBinding minimapKey;
@@ -437,8 +455,7 @@ jobs:
           public class ChunkOverlayRenderer {
 
               // Only chunks this close get drawn. Chunks further away are
-              // STILL MARKED and still show on the minimap - drawing boxes
-              // you cannot see is what was costing the frame rate.
+              // STILL MARKED and still show on the minimap.
               private static final int DRAW_DISTANCE_CHUNKS = 12;
 
               private static final int OUTLINE_RED = 0xFFFF0000;
@@ -550,8 +567,7 @@ jobs:
           import net.minecraft.client.MinecraftClient;
 
           // Light red wash over the screen while you stand inside an area you
-          // have already marked. Tied to the world switch, so turning that off
-          // leaves the game looking completely untouched.
+          // have already marked.
           public class ScreenTintRenderer {
 
               private static final int TINT = 0x22FF0000;
@@ -587,26 +603,32 @@ jobs:
           import net.minecraft.util.math.BlockPos;
           import net.minecraft.world.Heightmap;
 
-          // A terrain minimap in the top left corner, with thin lines marking
-          // chunk edges.
+          // A minimap in the top left corner with two modes.
+          //
+          // SURFACE draws whatever block is on top of the ground.
+          // CAVE ignores the surface and draws a slice at your own height, so
+          // tunnels and underground rooms show up instead of the grass over
+          // your head.
           //
           // The map is locked to a fixed grid in the world, so terrain, red
           // marks and chunk lines can never drift apart from each other.
-          //
-          // Zoom and size come from the Mod Menu settings screen.
           public class MinimapRenderer {
 
-              // How far from the corner, in real pixels.
               private static final int MARGIN_REAL = 16;
-
-              // Size of one map dot on screen, in GUI pixels.
               private static final int DOT = 2;
-
-              // How often the picture refreshes to pick up changed blocks.
-              // Moving or changing a setting refreshes it straight away.
               private static final int REFRESH_TICKS = 20;
 
+              // How far cave mode looks up and down from your feet when it
+              // hunts for the floor you would be standing on.
+              private static final int CAVE_LOOK_UP = 3;
+              private static final int CAVE_LOOK_DOWN = 14;
+
+              // Below this many blocks under the surface, AUTO flips to cave.
+              private static final int AUTO_DEPTH = 6;
+
               private static final int UNLOADED     = 0xFF15151A;
+              private static final int CAVE_ROCK    = 0xFF33333C;
+              private static final int CAVE_OPEN    = 0xFF07070B;
               private static final int BORDER_LIGHT = 0xFF9A9AA8;
               private static final int BORDER_DARK  = 0xFF000000;
               private static final int PLAYER_DOT   = 0xFFFFFFFF;
@@ -622,6 +644,8 @@ jobs:
               private static int cacheOriginX = Integer.MIN_VALUE;
               private static int cacheOriginZ = Integer.MIN_VALUE;
               private static int cacheBlocksPerDot = 0;
+              private static int cacheSliceY = Integer.MIN_VALUE;
+              private static boolean cacheCave = false;
               private static boolean cacheMarksShown = true;
 
               public static void tick() {
@@ -642,8 +666,6 @@ jobs:
 
                       int blocksPerDot = ModConfig.getBlocksPerDot();
 
-                      // The size setting is in real pixels, but drawing happens
-                      // in GUI pixels, which are bigger. Divide it down.
                       int scale = Math.max(1, (int) client.getWindow().getScaleFactor());
                       int mapSizeGui = Math.max(48, ModConfig.getMapSizeReal() / scale);
                       int margin = Math.max(2, MARGIN_REAL / scale);
@@ -654,22 +676,30 @@ jobs:
                       int half = dots / 2;
 
                       int playerX = (int) Math.floor(client.player.getX());
+                      int playerY = (int) Math.floor(client.player.getY());
                       int playerZ = (int) Math.floor(client.player.getZ());
 
-                      // Snap to the fixed world grid, so the map only shifts
-                      // when you cross into the next square.
                       int playerDotX = Math.floorDiv(playerX, blocksPerDot);
                       int playerDotZ = Math.floorDiv(playerZ, blocksPerDot);
                       int originX = (playerDotX - half) * blocksPerDot;
                       int originZ = (playerDotZ - half) * blocksPerDot;
 
+                      boolean cave = wantsCaveMode(client.world, playerX, playerY, playerZ);
                       boolean marksShown = ModConfig.isMinimapMarksOn();
+
+                      // In cave mode the picture depends on your height too,
+                      // so it has to redraw when you climb or drop a few
+                      // blocks. A couple of blocks of slack stops it
+                      // rebuilding on every stair step.
+                      boolean heightMoved = cave && Math.abs(cacheSliceY - playerY) >= 3;
 
                       if (cache == null || cacheDots != dots
                               || cacheOriginX != originX || cacheOriginZ != originZ
                               || cacheBlocksPerDot != blocksPerDot
+                              || cacheCave != cave || heightMoved
                               || cacheMarksShown != marksShown) {
-                          rebuild(client.world, dots, originX, originZ, blocksPerDot, marksShown);
+                          rebuild(client.world, dots, originX, originZ,
+                                  blocksPerDot, playerY, cave, marksShown);
                       }
 
                       int left = margin;
@@ -680,8 +710,6 @@ jobs:
                       drawContext.fill(left - 2, top - 2, right + 2, bottom + 2, BORDER_DARK);
                       drawContext.fill(left - 1, top - 1, right + 1, bottom + 1, BORDER_LIGHT);
 
-                      // Draw stretches of the same colour in one go rather
-                      // than one draw per dot.
                       for (int dy = 0; dy < dots; dy++) {
                           int runStart = 0;
                           int runColour = cache[dy * dots];
@@ -700,7 +728,6 @@ jobs:
                           }
                       }
 
-                      // Chunk lines, from the SAME origin as the terrain.
                       for (int dx = 0; dx < dots; dx++) {
                           if (Math.floorMod(originX + dx * blocksPerDot, 16) == 0) {
                               int x = left + dx * DOT;
@@ -718,8 +745,18 @@ jobs:
                   });
               }
 
-              // You, plus a short line pointing the way you are looking.
-              // Length comes from the settings screen, 0 means no line.
+              // SURFACE and CAVE are straightforward. AUTO looks at how far
+              // below the open sky you are and picks for you.
+              private static boolean wantsCaveMode(ClientWorld world,
+                                                   int playerX, int playerY, int playerZ) {
+                  int mode = ModConfig.getMapMode();
+                  if (mode == ModConfig.MODE_SURFACE) return false;
+                  if (mode == ModConfig.MODE_CAVE) return true;
+
+                  int surfaceY = world.getTopY(Heightmap.Type.WORLD_SURFACE, playerX, playerZ);
+                  return surfaceY - playerY > AUTO_DEPTH;
+              }
+
               private static void drawPlayer(DrawContext drawContext, MinecraftClient client,
                                              int left, int top, int half) {
                   int midX = left + half * DOT + DOT / 2;
@@ -727,15 +764,10 @@ jobs:
 
                   int length = ModConfig.getFacingLineLength();
                   if (length > 0) {
-                      // Minecraft yaw: 0 faces south, which is +Z, and on this
-                      // map +Z runs down the screen. So the direction you face
-                      // works out as these two.
                       double yaw = Math.toRadians(client.player.getYaw());
                       double faceX = -Math.sin(yaw);
                       double faceY = Math.cos(yaw);
 
-                      // Dark pass first, then white on top, so the line stays
-                      // readable over both pale sand and dark water.
                       for (int step = 3; step <= length; step++) {
                           int x = midX + (int) Math.round(faceX * step);
                           int y = midY + (int) Math.round(faceY * step);
@@ -752,10 +784,9 @@ jobs:
                   drawContext.fill(midX - 1, midY - 1, midX + 2, midY + 2, PLAYER_DOT);
               }
 
-              // Walks the ground around you and works out a colour per dot.
               private static void rebuild(ClientWorld world, int dots,
-                                          int originX, int originZ,
-                                          int blocksPerDot, boolean marksShown) {
+                                          int originX, int originZ, int blocksPerDot,
+                                          int sliceY, boolean cave, boolean marksShown) {
                   int[] colours = new int[dots * dots];
                   BlockPos.Mutable pos = new BlockPos.Mutable();
 
@@ -764,23 +795,13 @@ jobs:
                           int worldX = originX + dx * blocksPerDot;
                           int worldZ = originZ + dy * blocksPerDot;
 
-                          if (!world.isChunkLoaded(worldX >> 4, worldZ >> 4)) {
-                              colours[dy * dots + dx] = UNLOADED;
-                              continue;
-                          }
-
-                          int surfaceY = world.getTopY(Heightmap.Type.WORLD_SURFACE, worldX, worldZ);
-                          pos.set(worldX, surfaceY - 1, worldZ);
-                          BlockState state = world.getBlockState(pos);
-                          MapColor mapColour = state.getMapColor(world, pos);
-
                           int rgb;
-                          if (mapColour == null) {
+                          if (!world.isChunkLoaded(worldX >> 4, worldZ >> 4)) {
                               rgb = UNLOADED;
+                          } else if (cave) {
+                              rgb = caveColour(world, pos, worldX, worldZ, sliceY, blocksPerDot);
                           } else {
-                              MapColor.Brightness shade =
-                                      shadeFor(world, worldX, worldZ, surfaceY, blocksPerDot);
-                              rgb = 0xFF000000 | (mapColour.getRenderColor(shade) & 0x00FFFFFF);
+                              rgb = surfaceColour(world, pos, worldX, worldZ, blocksPerDot);
                           }
 
                           if (marksShown && ChunkTintState.isMarked(worldX >> 4, worldZ >> 4)) {
@@ -796,13 +817,74 @@ jobs:
                   cacheOriginX = originX;
                   cacheOriginZ = originZ;
                   cacheBlocksPerDot = blocksPerDot;
+                  cacheSliceY = sliceY;
+                  cacheCave = cave;
                   cacheMarksShown = marksShown;
               }
 
-              // Deep water darkens with depth, land shades by slope.
-              private static MapColor.Brightness shadeFor(ClientWorld world, int worldX,
-                                                          int worldZ, int surfaceY,
-                                                          int blocksPerDot) {
+              private static int surfaceColour(ClientWorld world, BlockPos.Mutable pos,
+                                               int worldX, int worldZ, int blocksPerDot) {
+                  int surfaceY = world.getTopY(Heightmap.Type.WORLD_SURFACE, worldX, worldZ);
+                  pos.set(worldX, surfaceY - 1, worldZ);
+                  BlockState state = world.getBlockState(pos);
+                  MapColor mapColour = state.getMapColor(world, pos);
+                  if (mapColour == null) return UNLOADED;
+
+                  MapColor.Brightness shade =
+                          surfaceShade(world, worldX, worldZ, surfaceY, blocksPerDot);
+                  return 0xFF000000 | (mapColour.getRenderColor(shade) & 0x00FFFFFF);
+              }
+
+              // Starts a little above your head and walks down looking for
+              // the first solid block that has air above it. That is the
+              // floor you would be standing on at this spot, which is what
+              // makes tunnels read as shapes rather than noise.
+              private static int caveColour(ClientWorld world, BlockPos.Mutable pos,
+                                            int worldX, int worldZ, int sliceY,
+                                            int blocksPerDot) {
+                  int top = sliceY + CAVE_LOOK_UP;
+                  int bottom = Math.max(world.getBottomY(), sliceY - CAVE_LOOK_DOWN);
+
+                  boolean sawAir = false;
+                  for (int y = top; y >= bottom; y--) {
+                      pos.set(worldX, y, worldZ);
+                      BlockState state = world.getBlockState(pos);
+
+                      if (state.isAir()) {
+                          sawAir = true;
+                          continue;
+                      }
+
+                      // Solid, and there was open space above it: a floor.
+                      if (sawAir) {
+                          MapColor mapColour = state.getMapColor(world, pos);
+                          if (mapColour == null) return CAVE_ROCK;
+
+                          // Floors near your own height stay bright. Ones far
+                          // below fade, so you can read depth at a glance.
+                          int drop = sliceY - y;
+                          MapColor.Brightness shade;
+                          if (drop <= 1) {
+                              shade = MapColor.Brightness.HIGH;
+                          } else if (drop <= 5) {
+                              shade = MapColor.Brightness.NORMAL;
+                          } else if (drop <= 10) {
+                              shade = MapColor.Brightness.LOW;
+                          } else {
+                              shade = MapColor.Brightness.LOWEST;
+                          }
+                          return 0xFF000000 | (mapColour.getRenderColor(shade) & 0x00FFFFFF);
+                      }
+                  }
+
+                  // Never found a gap, so this column is packed solid rock.
+                  // If it was air the whole way down, it is open space.
+                  return sawAir ? CAVE_OPEN : CAVE_ROCK;
+              }
+
+              private static MapColor.Brightness surfaceShade(ClientWorld world, int worldX,
+                                                              int worldZ, int surfaceY,
+                                                              int blocksPerDot) {
                   int floorY = world.getTopY(Heightmap.Type.OCEAN_FLOOR, worldX, worldZ);
                   int depth = surfaceY - floorY;
 
@@ -822,7 +904,6 @@ jobs:
                   return MapColor.Brightness.NORMAL;
               }
 
-              // Mixes red in without hiding the ground underneath.
               private static int washRed(int argb) {
                   int r = (argb >> 16) & 0xFF;
                   int g = (argb >> 8) & 0xFF;
