@@ -40,7 +40,7 @@ jobs:
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
           modmenu_version=17.0.1-beta.1
-          mod_version=5.0.0
+          mod_version=5.1.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -130,12 +130,11 @@ jobs:
           // minimap still shows you exactly where you have been.
           //
           // None of these stop chunks being recorded. The list keeps filling
-          // up no matter what, so switching anything back on brings the whole
-          // lot straight back.
+          // up no matter what.
           public class ModConfig {
 
-              // Zoom steps. All divide evenly into a 16 block chunk, which
-              // keeps the chunk grid lines landing in the right places.
+              // Zoom steps, in blocks per map pixel. All divide evenly into a
+              // 16 block chunk, which keeps the grid lines honest.
               private static final int[] ZOOM_STEPS = { 1, 2, 4, 8, 16 };
 
               // Minimap sizes, in real screen pixels.
@@ -145,7 +144,7 @@ jobs:
               private static boolean minimapOn = true;
               private static boolean minimapMarksOn = true;
 
-              private static int blocksPerDot = 8;
+              private static int blocksPerDot = 4;
               private static int mapSizeReal = 560;
 
               public static boolean isWorldMarksOn() {
@@ -180,7 +179,6 @@ jobs:
                   minimapMarksOn = value;
               }
 
-              // Steps to the next zoom level, wrapping back to the start.
               public static void cycleZoom() {
                   blocksPerDot = nextIn(ZOOM_STEPS, blocksPerDot);
               }
@@ -206,8 +204,8 @@ jobs:
           import com.terraformersmc.modmenu.api.ConfigScreenFactory;
           import com.terraformersmc.modmenu.api.ModMenuApi;
 
-          // Tells Mod Menu that this mod has a settings screen, so the cog
-          // button shows up next to it in the mod list.
+          // Tells Mod Menu this mod has a settings screen, so the cog button
+          // shows up next to it in the mod list.
           public class ModMenuIntegration implements ModMenuApi {
 
               @Override
@@ -555,31 +553,38 @@ jobs:
           import net.minecraft.util.math.BlockPos;
           import net.minecraft.world.Heightmap;
 
-          // A terrain minimap in the top left corner, with thin lines marking
-          // chunk edges.
+          // A terrain minimap in the top left corner.
           //
           // The map is locked to a fixed grid in the world, so terrain, red
           // marks and chunk lines can never drift apart from each other.
           //
-          // Zoom and size come from the Mod Menu settings screen.
+          // Each map dot is drawn as small as the screen allows, so the map is
+          // as detailed as it can be for the zoom you pick. One block per
+          // pixel is the hard ceiling - below that there is nothing more to
+          // show, because a block is the smallest thing the ground has.
           public class MinimapRenderer {
 
               // How far from the corner, in real pixels.
               private static final int MARGIN_REAL = 16;
 
-              // Size of one map dot on screen, in GUI pixels.
-              private static final int DOT = 2;
+              // Ceiling on dots across the map. Every dot has to be read out
+              // of the world, so this stops a huge map on a low GUI scale
+              // from causing a stutter when the picture is rebuilt.
+              private static final int MAX_DOTS = 192;
 
               // How often the picture refreshes to pick up changed blocks.
               // Moving or changing a setting refreshes it straight away.
               private static final int REFRESH_TICKS = 20;
 
-              private static final int UNLOADED     = 0xFF15151A;
-              private static final int BORDER_LIGHT = 0xFF9A9AA8;
-              private static final int BORDER_DARK  = 0xFF000000;
-              private static final int PLAYER_DOT   = 0xFFFFFFFF;
-              private static final int PLAYER_EDGE  = 0xFF000000;
-              private static final int CHUNK_LINE   = 0x33000000;
+              private static final int UNLOADED      = 0xFF15151A;
+              private static final int FRAME_OUTER   = 0xFF000000;
+              private static final int FRAME_SHADOW  = 0xFF4A4A56;
+              private static final int FRAME_LIGHT   = 0xFFC6C6D2;
+              private static final int FRAME_INNER   = 0xFF1B1B23;
+              private static final int PLAYER_DOT    = 0xFFFFFFFF;
+              private static final int PLAYER_EDGE   = 0xFF000000;
+              private static final int NORTH_MARK    = 0xFFE03A3A;
+              private static final int CHUNK_LINE    = 0x33000000;
 
               private static final double RED_STRENGTH = 0.5;
 
@@ -616,9 +621,13 @@ jobs:
                       int mapSizeGui = Math.max(48, ModConfig.getMapSizeReal() / scale);
                       int margin = Math.max(2, MARGIN_REAL / scale);
 
-                      int dots = Math.max(17, mapSizeGui / DOT);
+                      // One screen pixel per dot is the sharpest possible.
+                      // Only grow the dots if the map would otherwise need
+                      // more samples than the ceiling allows.
+                      int dotSize = Math.max(1, (mapSizeGui + MAX_DOTS - 1) / MAX_DOTS);
+                      int dots = Math.max(17, mapSizeGui / dotSize);
                       if (dots % 2 == 0) dots++;
-                      int drawnSize = dots * DOT;
+                      int drawnSize = dots * dotSize;
                       int half = dots / 2;
 
                       int playerX = (int) Math.floor(client.player.getX());
@@ -640,13 +649,17 @@ jobs:
                           rebuild(client.world, dots, originX, originZ, blocksPerDot, marksShown);
                       }
 
-                      int left = margin;
-                      int top = margin;
+                      int left = margin + 4;
+                      int top = margin + 4;
                       int right = left + drawnSize;
                       int bottom = top + drawnSize;
 
-                      drawContext.fill(left - 2, top - 2, right + 2, bottom + 2, BORDER_DARK);
-                      drawContext.fill(left - 1, top - 1, right + 1, bottom + 1, BORDER_LIGHT);
+                      // Bevelled frame: black edge, dark shadow, light rim,
+                      // then a dark inner line so the map reads as inset.
+                      drawContext.fill(left - 4, top - 4, right + 4, bottom + 4, FRAME_OUTER);
+                      drawContext.fill(left - 3, top - 3, right + 3, bottom + 3, FRAME_SHADOW);
+                      drawContext.fill(left - 2, top - 2, right + 2, bottom + 2, FRAME_LIGHT);
+                      drawContext.fill(left - 1, top - 1, right + 1, bottom + 1, FRAME_INNER);
 
                       // Draw stretches of the same colour in one go rather
                       // than one draw per dot.
@@ -659,8 +672,8 @@ jobs:
 
                               if (here != runColour) {
                                   drawContext.fill(
-                                          left + runStart * DOT, top + dy * DOT,
-                                          left + dx * DOT, top + dy * DOT + DOT,
+                                          left + runStart * dotSize, top + dy * dotSize,
+                                          left + dx * dotSize, top + dy * dotSize + dotSize,
                                           runColour);
                                   runStart = dx;
                                   runColour = here;
@@ -669,24 +682,56 @@ jobs:
                       }
 
                       // Chunk lines, from the SAME origin as the terrain.
-                      for (int dx = 0; dx < dots; dx++) {
-                          if (Math.floorMod(originX + dx * blocksPerDot, 16) == 0) {
-                              int x = left + dx * DOT;
-                              drawContext.fill(x, top, x + 1, bottom, CHUNK_LINE);
+                      // Skipped when a chunk is too few pixels wide to read,
+                      // otherwise the grid turns into a solid smear.
+                      int chunkPixels = (16 / blocksPerDot) * dotSize;
+                      if (chunkPixels >= 4) {
+                          for (int dx = 0; dx < dots; dx++) {
+                              if (Math.floorMod(originX + dx * blocksPerDot, 16) == 0) {
+                                  int x = left + dx * dotSize;
+                                  drawContext.fill(x, top, x + 1, bottom, CHUNK_LINE);
+                              }
                           }
-                      }
-                      for (int dy = 0; dy < dots; dy++) {
-                          if (Math.floorMod(originZ + dy * blocksPerDot, 16) == 0) {
-                              int y = top + dy * DOT;
-                              drawContext.fill(left, y, right, y + 1, CHUNK_LINE);
+                          for (int dy = 0; dy < dots; dy++) {
+                              if (Math.floorMod(originZ + dy * blocksPerDot, 16) == 0) {
+                                  int y = top + dy * dotSize;
+                                  drawContext.fill(left, y, right, y + 1, CHUNK_LINE);
+                              }
                           }
                       }
 
-                      int midX = left + half * DOT + DOT / 2;
-                      int midY = top + half * DOT + DOT / 2;
-                      drawContext.fill(midX - 2, midY - 2, midX + 3, midY + 3, PLAYER_EDGE);
-                      drawContext.fill(midX - 1, midY - 1, midX + 2, midY + 2, PLAYER_DOT);
+                      // Small red tick on the top edge, so north is obvious.
+                      int centreX = left + drawnSize / 2;
+                      drawContext.fill(centreX - 1, top, centreX + 2, top + 5, NORTH_MARK);
+
+                      drawPlayer(drawContext, client, left, top, half, dotSize);
                   });
+              }
+
+              // You, plus a short line showing which way you are looking.
+              private static void drawPlayer(net.minecraft.client.gui.DrawContext drawContext,
+                                             MinecraftClient client,
+                                             int left, int top, int half, int dotSize) {
+                  int midX = left + half * dotSize + dotSize / 2;
+                  int midY = top + half * dotSize + dotSize / 2;
+
+                  double yaw = Math.toRadians(client.player.getYaw());
+                  double faceX = -Math.sin(yaw);
+                  double faceY = Math.cos(yaw);
+
+                  for (int step = 3; step <= 8; step++) {
+                      int x = midX + (int) Math.round(faceX * step);
+                      int y = midY + (int) Math.round(faceY * step);
+                      drawContext.fill(x - 1, y - 1, x + 2, y + 2, PLAYER_EDGE);
+                  }
+                  for (int step = 3; step <= 8; step++) {
+                      int x = midX + (int) Math.round(faceX * step);
+                      int y = midY + (int) Math.round(faceY * step);
+                      drawContext.fill(x, y, x + 1, y + 1, PLAYER_DOT);
+                  }
+
+                  drawContext.fill(midX - 3, midY - 3, midX + 4, midY + 4, PLAYER_EDGE);
+                  drawContext.fill(midX - 2, midY - 2, midX + 3, midY + 3, PLAYER_DOT);
               }
 
               // Walks the ground around you and works out a colour per dot.
