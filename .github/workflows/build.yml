@@ -23,15 +23,6 @@ jobs:
           mkdir -p src/main/java/com/example/chunktracker
           mkdir -p src/main/resources/assets/chunktracker/lang
 
-          # The mod logo. Mod Menu reads this from inside the jar, so the
-          # picture has to be downloaded and packed in at build time - a web
-          # link on its own would not work.
-          curl -sL -o src/main/resources/assets/chunktracker/icon.png \
-            "https://cdn.phototourl.com/free/2026-09-16-22a7c78f-7eb0-4f98-b1b5-0b874b2acea6.png"
-          echo "icon size in bytes:"
-          wc -c < src/main/resources/assets/chunktracker/icon.png
-          file src/main/resources/assets/chunktracker/icon.png
-
           cat > settings.gradle << 'EOF'
           pluginManagement {
               repositories {
@@ -49,7 +40,7 @@ jobs:
           loader_version=0.18.1
           fabric_version=0.141.6+1.21.11
           modmenu_version=17.0.1-beta.1
-          mod_version=4.1.0
+          mod_version=5.0.0
           maven_group=com.example.chunktracker
           archives_base_name=chunktracker
           EOF
@@ -103,11 +94,7 @@ jobs:
             "id": "chunktracker",
             "version": "${version}",
             "name": "Chunk Tracker",
-            "description": "Automatically marks the chunks you have walked through with red borders, a screen tint and its own terrain minimap, so you always know where you have already searched.\n\nMade by primemain.",
-            "authors": [
-              "primemain"
-            ],
-            "icon": "assets/chunktracker/icon.png",
+            "description": "Automatically marks the chunks you have walked through, with a red border wall, a screen tint, and its own terrain minimap.",
             "environment": "client",
             "license": "CC0-1.0",
             "entrypoints": {
@@ -136,15 +123,30 @@ jobs:
           cat > src/main/java/com/example/chunktracker/ModConfig.java << 'EOF'
           package com.example.chunktracker;
 
-          // The two switches, flipped from the Mod Menu settings screen.
+          // Everything the Mod Menu settings screen controls.
           //
-          // Turning something off only stops it being DRAWN. Chunks keep
-          // being marked in the background, so switching back on brings
-          // everything you walked through straight back.
+          // The three switches are separate on purpose. Turning the world
+          // marks off leaves the game looking completely normal while the
+          // minimap still shows you exactly where you have been.
+          //
+          // None of these stop chunks being recorded. The list keeps filling
+          // up no matter what, so switching anything back on brings the whole
+          // lot straight back.
           public class ModConfig {
+
+              // Zoom steps. All divide evenly into a 16 block chunk, which
+              // keeps the chunk grid lines landing in the right places.
+              private static final int[] ZOOM_STEPS = { 1, 2, 4, 8, 16 };
+
+              // Minimap sizes, in real screen pixels.
+              private static final int[] SIZE_STEPS = { 280, 420, 560, 700, 840 };
 
               private static boolean worldMarksOn = true;
               private static boolean minimapOn = true;
+              private static boolean minimapMarksOn = true;
+
+              private static int blocksPerDot = 8;
+              private static int mapSizeReal = 560;
 
               public static boolean isWorldMarksOn() {
                   return worldMarksOn;
@@ -154,12 +156,46 @@ jobs:
                   return minimapOn;
               }
 
+              public static boolean isMinimapMarksOn() {
+                  return minimapMarksOn;
+              }
+
+              public static int getBlocksPerDot() {
+                  return blocksPerDot;
+              }
+
+              public static int getMapSizeReal() {
+                  return mapSizeReal;
+              }
+
               public static void setWorldMarksOn(boolean value) {
                   worldMarksOn = value;
               }
 
               public static void setMinimapOn(boolean value) {
                   minimapOn = value;
+              }
+
+              public static void setMinimapMarksOn(boolean value) {
+                  minimapMarksOn = value;
+              }
+
+              // Steps to the next zoom level, wrapping back to the start.
+              public static void cycleZoom() {
+                  blocksPerDot = nextIn(ZOOM_STEPS, blocksPerDot);
+              }
+
+              public static void cycleSize() {
+                  mapSizeReal = nextIn(SIZE_STEPS, mapSizeReal);
+              }
+
+              private static int nextIn(int[] steps, int current) {
+                  for (int i = 0; i < steps.length; i++) {
+                      if (steps[i] == current) {
+                          return steps[(i + 1) % steps.length];
+                      }
+                  }
+                  return steps[0];
               }
           }
           EOF
@@ -188,7 +224,7 @@ jobs:
           import net.minecraft.client.gui.widget.ButtonWidget;
           import net.minecraft.text.Text;
 
-          // The settings screen. Two switches and a done button.
+          // The settings screen: three switches, two cycling values, and done.
           public class ConfigScreen extends Screen {
 
               private final Screen parent;
@@ -200,38 +236,65 @@ jobs:
 
               @Override
               protected void init() {
-                  int centreX = this.width / 2;
-                  int buttonWidth = 220;
-                  int left = centreX - buttonWidth / 2;
-                  int y = this.height / 4 + 20;
+                  int buttonWidth = 260;
+                  int left = this.width / 2 - buttonWidth / 2;
+                  int y = this.height / 6;
+                  int gap = 24;
 
-                  ButtonWidget worldButton = ButtonWidget.builder(worldLabel(), button -> {
+                  this.addDrawableChild(ButtonWidget.builder(worldLabel(), button -> {
                       ModConfig.setWorldMarksOn(!ModConfig.isWorldMarksOn());
                       button.setMessage(worldLabel());
-                  }).dimensions(left, y, buttonWidth, 20).build();
+                  }).dimensions(left, y, buttonWidth, 20).build());
 
-                  ButtonWidget minimapButton = ButtonWidget.builder(minimapLabel(), button -> {
+                  this.addDrawableChild(ButtonWidget.builder(minimapMarksLabel(), button -> {
+                      ModConfig.setMinimapMarksOn(!ModConfig.isMinimapMarksOn());
+                      button.setMessage(minimapMarksLabel());
+                  }).dimensions(left, y + gap, buttonWidth, 20).build());
+
+                  this.addDrawableChild(ButtonWidget.builder(minimapLabel(), button -> {
                       ModConfig.setMinimapOn(!ModConfig.isMinimapOn());
                       button.setMessage(minimapLabel());
-                  }).dimensions(left, y + 28, buttonWidth, 20).build();
+                  }).dimensions(left, y + gap * 2, buttonWidth, 20).build());
 
-                  ButtonWidget doneButton = ButtonWidget.builder(
+                  this.addDrawableChild(ButtonWidget.builder(zoomLabel(), button -> {
+                      ModConfig.cycleZoom();
+                      button.setMessage(zoomLabel());
+                  }).dimensions(left, y + gap * 3 + 10, buttonWidth, 20).build());
+
+                  this.addDrawableChild(ButtonWidget.builder(sizeLabel(), button -> {
+                      ModConfig.cycleSize();
+                      button.setMessage(sizeLabel());
+                  }).dimensions(left, y + gap * 4 + 10, buttonWidth, 20).build());
+
+                  this.addDrawableChild(ButtonWidget.builder(
                           Text.literal("Done"), button -> this.close()
-                  ).dimensions(left, y + 72, buttonWidth, 20).build();
-
-                  this.addDrawableChild(worldButton);
-                  this.addDrawableChild(minimapButton);
-                  this.addDrawableChild(doneButton);
+                  ).dimensions(left, y + gap * 5 + 30, buttonWidth, 20).build());
               }
 
               private static Text worldLabel() {
-                  return Text.literal("Red chunk marks in world: "
+                  return Text.literal("Red marks in the world: "
                           + (ModConfig.isWorldMarksOn() ? "ON" : "OFF"));
               }
 
+              private static Text minimapMarksLabel() {
+                  return Text.literal("Red marks on the minimap: "
+                          + (ModConfig.isMinimapMarksOn() ? "ON" : "OFF"));
+              }
+
               private static Text minimapLabel() {
-                  return Text.literal("Minimap: "
+                  return Text.literal("Show minimap: "
                           + (ModConfig.isMinimapOn() ? "ON" : "OFF"));
+              }
+
+              private static Text zoomLabel() {
+                  int blocks = ModConfig.getBlocksPerDot();
+                  return Text.literal("Zoom: " + blocks
+                          + (blocks == 1 ? " block per pixel" : " blocks per pixel")
+                          + "  (higher = see further)");
+              }
+
+              private static Text sizeLabel() {
+                  return Text.literal("Minimap size: " + ModConfig.getMapSizeReal());
               }
 
               @Override
@@ -252,8 +315,8 @@ jobs:
 
           // The list of every chunk you have walked through.
           //
-          // Nothing is ever removed from this list, and it keeps filling up
-          // even while the switches are off.
+          // Nothing is ever removed, and it keeps filling up even while every
+          // switch is off.
           //
           // Lives only in memory on your own client. Nothing is saved to the
           // world, nothing is sent to the server, nothing touches real blocks.
@@ -289,8 +352,8 @@ jobs:
           import net.minecraft.client.util.InputUtil;
           import org.lwjgl.glfw.GLFW;
 
-          // Marking happens by itself as you walk, always, even with the
-          // switches off. O still hides the minimap quickly if you want.
+          // Marking happens by itself as you walk, always, whatever the
+          // switches say. O is a quick shortcut for the minimap switch.
           public class ChunkTracker implements ClientModInitializer {
 
               private static KeyBinding minimapKey;
@@ -455,8 +518,9 @@ jobs:
           import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
           import net.minecraft.client.MinecraftClient;
 
-          // Light red wash over the screen while you stand inside an area
-          // you have already marked.
+          // Light red wash over the screen while you stand inside an area you
+          // have already marked. Tied to the world switch, so turning that off
+          // leaves the game looking completely untouched.
           public class ScreenTintRenderer {
 
               private static final int TINT = 0x22FF0000;
@@ -496,41 +560,28 @@ jobs:
           //
           // The map is locked to a fixed grid in the world, so terrain, red
           // marks and chunk lines can never drift apart from each other.
+          //
+          // Zoom and size come from the Mod Menu settings screen.
           public class MinimapRenderer {
-
-              // ---- SETTINGS YOU CAN CHANGE ----
-
-              // How wide the map is on screen, in REAL screen pixels.
-              private static final int MAP_SIZE_REAL = 560;
 
               // How far from the corner, in real pixels.
               private static final int MARGIN_REAL = 16;
-
-              // Blocks covered by one map dot. THIS IS THE ZOOM.
-              // Keep it to 1, 2, 4, 8 or 16 so it divides into a chunk evenly.
-              private static final int BLOCKS_PER_DOT = 8;
 
               // Size of one map dot on screen, in GUI pixels.
               private static final int DOT = 2;
 
               // How often the picture refreshes to pick up changed blocks.
-              // Moving always refreshes straight away regardless.
+              // Moving or changing a setting refreshes it straight away.
               private static final int REFRESH_TICKS = 20;
 
-              // Colours, 0xAARRGGBB.
               private static final int UNLOADED     = 0xFF15151A;
               private static final int BORDER_LIGHT = 0xFF9A9AA8;
               private static final int BORDER_DARK  = 0xFF000000;
               private static final int PLAYER_DOT   = 0xFFFFFFFF;
               private static final int PLAYER_EDGE  = 0xFF000000;
-
-              // The chunk grid. 0x00 turns the grid off entirely.
               private static final int CHUNK_LINE   = 0x33000000;
 
-              // How strongly marked chunks are washed red, 0.0 to 1.0.
               private static final double RED_STRENGTH = 0.5;
-
-              // ---- END OF SETTINGS ----
 
               private static int tickCounter = 0;
 
@@ -538,6 +589,7 @@ jobs:
               private static int cacheDots = 0;
               private static int cacheOriginX = Integer.MIN_VALUE;
               private static int cacheOriginZ = Integer.MIN_VALUE;
+              private static int cacheBlocksPerDot = 0;
               private static boolean cacheMarksShown = true;
 
               public static void tick() {
@@ -556,10 +608,12 @@ jobs:
                       if (client.player == null || client.world == null) return;
                       if (client.options.hudHidden) return;
 
-                      // The size above is in real pixels, but drawing happens
+                      int blocksPerDot = ModConfig.getBlocksPerDot();
+
+                      // The size setting is in real pixels, but drawing happens
                       // in GUI pixels, which are bigger. Divide it down.
                       int scale = Math.max(1, (int) client.getWindow().getScaleFactor());
-                      int mapSizeGui = Math.max(48, MAP_SIZE_REAL / scale);
+                      int mapSizeGui = Math.max(48, ModConfig.getMapSizeReal() / scale);
                       int margin = Math.max(2, MARGIN_REAL / scale);
 
                       int dots = Math.max(17, mapSizeGui / DOT);
@@ -572,17 +626,18 @@ jobs:
 
                       // Snap to the fixed world grid, so the map only shifts
                       // when you cross into the next square.
-                      int playerDotX = Math.floorDiv(playerX, BLOCKS_PER_DOT);
-                      int playerDotZ = Math.floorDiv(playerZ, BLOCKS_PER_DOT);
-                      int originX = (playerDotX - half) * BLOCKS_PER_DOT;
-                      int originZ = (playerDotZ - half) * BLOCKS_PER_DOT;
+                      int playerDotX = Math.floorDiv(playerX, blocksPerDot);
+                      int playerDotZ = Math.floorDiv(playerZ, blocksPerDot);
+                      int originX = (playerDotX - half) * blocksPerDot;
+                      int originZ = (playerDotZ - half) * blocksPerDot;
 
-                      boolean marksShown = ModConfig.isWorldMarksOn();
+                      boolean marksShown = ModConfig.isMinimapMarksOn();
 
                       if (cache == null || cacheDots != dots
                               || cacheOriginX != originX || cacheOriginZ != originZ
+                              || cacheBlocksPerDot != blocksPerDot
                               || cacheMarksShown != marksShown) {
-                          rebuild(client.world, dots, originX, originZ, marksShown);
+                          rebuild(client.world, dots, originX, originZ, blocksPerDot, marksShown);
                       }
 
                       int left = margin;
@@ -615,13 +670,13 @@ jobs:
 
                       // Chunk lines, from the SAME origin as the terrain.
                       for (int dx = 0; dx < dots; dx++) {
-                          if (Math.floorMod(originX + dx * BLOCKS_PER_DOT, 16) == 0) {
+                          if (Math.floorMod(originX + dx * blocksPerDot, 16) == 0) {
                               int x = left + dx * DOT;
                               drawContext.fill(x, top, x + 1, bottom, CHUNK_LINE);
                           }
                       }
                       for (int dy = 0; dy < dots; dy++) {
-                          if (Math.floorMod(originZ + dy * BLOCKS_PER_DOT, 16) == 0) {
+                          if (Math.floorMod(originZ + dy * blocksPerDot, 16) == 0) {
                               int y = top + dy * DOT;
                               drawContext.fill(left, y, right, y + 1, CHUNK_LINE);
                           }
@@ -636,14 +691,15 @@ jobs:
 
               // Walks the ground around you and works out a colour per dot.
               private static void rebuild(ClientWorld world, int dots,
-                                          int originX, int originZ, boolean marksShown) {
+                                          int originX, int originZ,
+                                          int blocksPerDot, boolean marksShown) {
                   int[] colours = new int[dots * dots];
                   BlockPos.Mutable pos = new BlockPos.Mutable();
 
                   for (int dy = 0; dy < dots; dy++) {
                       for (int dx = 0; dx < dots; dx++) {
-                          int worldX = originX + dx * BLOCKS_PER_DOT;
-                          int worldZ = originZ + dy * BLOCKS_PER_DOT;
+                          int worldX = originX + dx * blocksPerDot;
+                          int worldZ = originZ + dy * blocksPerDot;
 
                           if (!world.isChunkLoaded(worldX >> 4, worldZ >> 4)) {
                               colours[dy * dots + dx] = UNLOADED;
@@ -659,9 +715,9 @@ jobs:
                           if (mapColour == null) {
                               rgb = UNLOADED;
                           } else {
-                              rgb = 0xFF000000
-                                    | (mapColour.getRenderColor(shadeFor(world, worldX, worldZ, surfaceY))
-                                       & 0x00FFFFFF);
+                              MapColor.Brightness shade =
+                                      shadeFor(world, worldX, worldZ, surfaceY, blocksPerDot);
+                              rgb = 0xFF000000 | (mapColour.getRenderColor(shade) & 0x00FFFFFF);
                           }
 
                           if (marksShown && ChunkTintState.isMarked(worldX >> 4, worldZ >> 4)) {
@@ -676,12 +732,14 @@ jobs:
                   cacheDots = dots;
                   cacheOriginX = originX;
                   cacheOriginZ = originZ;
+                  cacheBlocksPerDot = blocksPerDot;
                   cacheMarksShown = marksShown;
               }
 
               // Deep water darkens with depth, land shades by slope.
-              private static MapColor.Brightness shadeFor(ClientWorld world,
-                                                          int worldX, int worldZ, int surfaceY) {
+              private static MapColor.Brightness shadeFor(ClientWorld world, int worldX,
+                                                          int worldZ, int surfaceY,
+                                                          int blocksPerDot) {
                   int floorY = world.getTopY(Heightmap.Type.OCEAN_FLOOR, worldX, worldZ);
                   int depth = surfaceY - floorY;
 
@@ -692,7 +750,7 @@ jobs:
                   }
 
                   int northY = world.getTopY(Heightmap.Type.WORLD_SURFACE,
-                          worldX, worldZ - BLOCKS_PER_DOT);
+                          worldX, worldZ - blocksPerDot);
                   int rise = surfaceY - northY;
 
                   if (rise > 2) return MapColor.Brightness.HIGH;
